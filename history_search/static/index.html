@@ -105,6 +105,23 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .pg-btn:disabled{opacity:.3;cursor:default}
 .pg-btn:hover:not(:disabled){border-color:var(--accent);color:var(--txt-0)}
 
+/* Exclude chips */
+.excl-chips{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.excl-chip{font-family:var(--mono);font-size:.66rem;padding:2px 6px;background:var(--red-dim);color:var(--red);border-radius:3px;cursor:pointer;display:inline-flex;align-items:center;gap:3px}
+.excl-chip:hover{background:var(--red);color:#fff}
+
+/* Decode panel */
+.decode-panel{margin-top:8px;padding:8px 10px;background:var(--bg-0);border:1px solid var(--border);border-radius:var(--r);font-family:var(--mono);font-size:.7rem}
+.decode-panel .decode-in{width:100%;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-0);font-family:var(--mono);font-size:.7rem;padding:6px 8px;margin-bottom:6px;outline:0;resize:vertical}
+.decode-panel .decode-in:focus{border-color:var(--accent)}
+.decode-result{padding:4px 6px;background:var(--bg-2);border-radius:3px;margin-top:4px;word-break:break-all;white-space:pre-wrap;color:var(--green)}
+.decode-btns{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px}
+.decode-btn{font-family:var(--mono);font-size:.64rem;padding:2px 8px;border:1px solid var(--border);border-radius:3px;background:var(--bg-2);color:var(--txt-1);cursor:pointer}
+.decode-btn:hover{border-color:var(--accent);color:var(--txt-0)}
+
+/* Infinite scroll sentinel */
+.scroll-sentinel{height:1px;width:100%}
+
 /* Cards */
 .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
 .card{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px}
@@ -207,6 +224,46 @@ const api = {
 
 function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
 
+// String decoder for forensic analysis
+function tryDecode(input){
+  const results=[];
+  if(!input||!input.trim())return results;
+  const s=input.trim();
+  // URL decode
+  try{const d=decodeURIComponent(s);if(d!==s)results.push({method:'URL Decode',value:d})}catch(e){}
+  // Base64
+  try{if(/^[A-Za-z0-9+/=_-]{4,}$/.test(s)){
+    const b64=s.replace(/-/g,'+').replace(/_/g,'/');
+    const pad=b64.length%4===0?b64:b64+'='.repeat(4-b64.length%4);
+    const decoded=atob(pad);
+    // Check if result is mostly printable
+    const printable=decoded.split('').filter(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)<127).length;
+    if(printable>decoded.length*0.7&&decoded.length>1)results.push({method:'Base64',value:decoded});
+    // Try as JSON
+    try{const j=JSON.parse(decoded);results.push({method:'Base64 → JSON',value:JSON.stringify(j,null,2)})}catch(e){}
+  }}catch(e){}
+  // Hex
+  try{if(/^(0x)?[0-9a-fA-F]{4,}$/.test(s)&&s.replace(/^0x/,'').length%2===0){
+    const hex=s.replace(/^0x/,'');
+    const bytes=hex.match(/.{2}/g).map(b=>parseInt(b,16));
+    const decoded=String.fromCharCode(...bytes);
+    const printable=decoded.split('').filter(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)<127).length;
+    if(printable>decoded.length*0.7&&decoded.length>1)results.push({method:'Hex',value:decoded});
+  }}catch(e){}
+  // JWT segments
+  try{if(s.startsWith('eyJ')&&s.split('.').length===3){
+    const parts=s.split('.');
+    parts.slice(0,2).forEach((p,i)=>{
+      try{
+        const b=atob(p.replace(/-/g,'+').replace(/_/g,'/'));
+        const j=JSON.parse(b);
+        results.push({method:i===0?'JWT Header':'JWT Payload',value:JSON.stringify(j,null,2)});
+      }catch(e){}
+    });
+  }}catch(e){}
+  return results;
+}
+
 function fmtSize(b){if(b==null)return '';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'K';if(b<1073741824)return(b/1048576).toFixed(1)+'M';return(b/1073741824).toFixed(1)+'G'}
 
 // Shared components
@@ -281,48 +338,96 @@ function Heatmap({cells}){
 // FILE PICKER DIALOG
 // ============================================================
 function FilePicker({onSelect,onClose}){
-  const[path,setPath]=useState('/');
+  const[path,setPath]=useState('');
   const[entries,setEntries]=useState([]);
   const[parent,setParent]=useState(null);
   const[selected,setSelected]=useState(null);
   const[loading,setLoading]=useState(false);
   const[error,setError]=useState('');
+  const[filter,setFilter]=useState('');
+  const[sortBy,setSortBy]=useState('name'); // name, date, size
+  const[pathInput,setPathInput]=useState('');
+  const[cwd,setCwd]=useState('/');
+  const filterRef=useRef(null);
 
   const browse=useCallback(async(p)=>{
-    setLoading(true);setError('');
+    setLoading(true);setError('');setFilter('');
     try{
       const r=await api.browse(p);
       if(r.error){setError(r.error);setLoading(false);return}
       setPath(r.path);setEntries(r.entries||[]);setParent(r.parent);setSelected(null);
+      setPathInput(r.path);
+      if(r.cwd)setCwd(r.cwd);
     }catch(e){setError(e.message)}
     setLoading(false);
   },[]);
 
-  useEffect(()=>{browse('/')},[browse]);
+  // Start at CWD
+  useEffect(()=>{browse('.')},[browse]);
 
   const handleSelect=(entry)=>{
     if(entry.is_dir){browse(entry.path)}
     else{setSelected(entry.path)}
   };
 
+  const goToPath=()=>{
+    const p=pathInput.trim();
+    if(p)browse(p);
+  };
+
+  // Filter + sort entries
+  const filtered=useMemo(()=>{
+    let list=entries;
+    if(filter){
+      const lf=filter.toLowerCase();
+      list=list.filter(e=>e.name.toLowerCase().includes(lf));
+    }
+    if(sortBy==='date')list=[...list].sort((a,b)=>(b.mtime||0)-(a.mtime||0));
+    else if(sortBy==='size')list=[...list].sort((a,b)=>{
+      if(a.is_dir&&!b.is_dir)return -1;if(!a.is_dir&&b.is_dir)return 1;
+      return (b.size||0)-(a.size||0);
+    });
+    // default name sort is already from server
+    return list;
+  },[entries,filter,sortBy]);
+
+  const fmtDate=(ts)=>{if(!ts)return '';const d=new Date(ts*1000);return d.toISOString().replace('T',' ').slice(0,16)};
+
   return(<div className="fp-overlay" onClick={onClose}>
     <div className="fp-dialog" onClick={e=>e.stopPropagation()}>
-      <div className="card-h">Browse Server Files</div>
-      <div className="fp-path">{path}</div>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+        <div className="card-h" style={{margin:0}}>Browse Server Files</div>
+        <button className="decode-btn" onClick={()=>browse(cwd)} title="Go to server working directory">CWD</button>
+        <button className="decode-btn" onClick={()=>browse('/')} title="Go to root">/</button>
+      </div>
+      <div style={{display:'flex',gap:4,marginBottom:8}}>
+        <input className="f-in" style={{flex:1,fontSize:'.74rem'}} value={pathInput} onChange={e=>setPathInput(e.target.value)}
+          onKeyDown={e=>{if(e.key==='Enter')goToPath()}} placeholder="Type a path and press Enter..."/>
+        <button className="decode-btn" onClick={goToPath}>Go</button>
+      </div>
       {error&&<div style={{color:'var(--red)',fontSize:'.78rem',marginBottom:8}}>{error}</div>}
+      <div style={{display:'flex',gap:6,marginBottom:6,alignItems:'center'}}>
+        <input ref={filterRef} className="f-in" style={{flex:1}} value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter filenames..."/>
+        <span style={{fontFamily:'var(--mono)',fontSize:'.62rem',color:'var(--txt-2)'}}>Sort:</span>
+        <button className={`decode-btn${sortBy==='name'?' on':''}`} style={sortBy==='name'?{borderColor:'var(--accent)',color:'var(--accent)'}:{}} onClick={()=>setSortBy('name')}>Name</button>
+        <button className={`decode-btn${sortBy==='date'?' on':''}`} style={sortBy==='date'?{borderColor:'var(--accent)',color:'var(--accent)'}:{}} onClick={()=>setSortBy('date')}>Date</button>
+        <button className={`decode-btn${sortBy==='size'?' on':''}`} style={sortBy==='size'?{borderColor:'var(--accent)',color:'var(--accent)'}:{}} onClick={()=>setSortBy('size')}>Size</button>
+      </div>
       {loading?<div style={{padding:20}}><Spin/> Loading...</div>:(
         <div className="fp-list">
           {parent&&<div className="fp-item" onClick={()=>browse(parent)}>
             <span className="fp-icon">..</span><span className="fp-name">(parent directory)</span>
           </div>}
-          {entries.map(e=>(
+          {filtered.map(e=>(
             <div key={e.path} className={`fp-item ${selected===e.path?'selected':''}`}
               onClick={()=>handleSelect(e)} onDoubleClick={()=>{if(e.is_dir)browse(e.path);else{onSelect(e.path);onClose()}}}>
               <span className="fp-icon">{e.is_dir?'\u{1F4C1}':e.ingestable?'\u{1F4E6}':'\u{1F4C4}'}</span>
-              <span className="fp-name">{e.name}</span>
+              <span className="fp-name" style={{flex:1}}>{e.name}</span>
+              <span style={{fontFamily:'var(--mono)',fontSize:'.62rem',color:'var(--txt-2)',minWidth:120,textAlign:'right'}}>{fmtDate(e.mtime)}</span>
               <span className="fp-size">{fmtSize(e.size)}</span>
             </div>
           ))}
+          {filtered.length===0&&entries.length>0&&<div style={{padding:20,color:'var(--txt-2)'}}>No files match "{filter}"</div>}
           {entries.length===0&&!parent&&<div style={{padding:20,color:'var(--txt-2)'}}>Empty directory</div>}
         </div>
       )}
@@ -362,13 +467,20 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const[transType,setTransType]=useState(initialFilters?.transition_type||'');
   const[startDate,setStartDate]=useState(initialFilters?.start||'');
   const[endDate,setEndDate]=useState(initialFilters?.end||'');
+  const[excludeHosts,setExcludeHosts]=useState([]);
   const[results,setResults]=useState(null);
+  const[allRows,setAllRows]=useState([]);
   const[loading,setLoading]=useState(false);
   const[offset,setOffset]=useState(0);
   const[expanded,setExpanded]=useState(null);
   const[filterOpts,setFilterOpts]=useState(null);
   const[sortCol,setSortCol]=useState('time');
   const[sortDir,setSortDir]=useState('desc');
+  const[decodeInput,setDecodeInput]=useState('');
+  const[searchMode,setSearchMode]=useState('fts');
+  const[searchError,setSearchError]=useState('');
+  const sentinelRef=useRef(null);
+  const loadingMore=useRef(false);
   const dq=useDebounce(q,300);
 
   // Lazy-load filter options on first interaction
@@ -384,21 +496,53 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     if(initialFilters?.transition_type)setTransType(initialFilters.transition_type);
   },[initialFilters]);
 
-  const doSearch=useCallback(async(query,off)=>{
-    setLoading(true);
+  const doSearch=useCallback(async(query,off,append=false)=>{
+    setLoading(true);setSearchError('');
+    loadingMore.current=true;
     const p={limit:PAGE,offset:off,sort:sortCol,sort_dir:sortDir};
-    if(query)p.q=query;
+    if(query){p.q=query;p.mode=searchMode}
     if(host)p.host=host;if(browser)p.browser=browser;
     if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
     if(tag)p.tag=tag;if(transType)p.transition_type=transType;
     if(startDate)p.start=startDate+'T00:00:00Z';
     if(endDate)p.end=endDate+'T23:59:59Z';
-    try{setResults(await api.search(p))}catch(e){console.error(e)}
+    if(excludeHosts.length)p.exclude_host=excludeHosts.join(',');
+    try{
+      const resp=await fetch('/api/search?'+new URLSearchParams(p));
+      const res=await resp.json();
+      if(res.error){setSearchError(res.error);setResults({total:0,results:[]});setAllRows([]);}
+      else{
+        setResults(res);
+        if(append){setAllRows(prev=>[...prev,...(res.results||[])])}
+        else{setAllRows(res.results||[])}
+      }
+    }catch(e){console.error(e)}
     setLoading(false);
-  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir]);
+    loadingMore.current=false;
+  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir,excludeHosts,searchMode]);
 
-  useEffect(()=>{setOffset(0);doSearch(dq,0)},[dq,doSearch]);
-  useEffect(()=>{doSearch(dq,offset)},[offset]);
+  // Reset on filter/query change
+  useEffect(()=>{setOffset(0);setAllRows([]);doSearch(dq,0,false)},[dq,doSearch]);
+
+  // Load more on infinite scroll
+  const loadMore=useCallback(()=>{
+    if(loadingMore.current||!results)return;
+    const newOff=offset+PAGE;
+    if(newOff>=results.total)return;
+    setOffset(newOff);
+    doSearch(dq,newOff,true);
+  },[offset,results,dq,doSearch]);
+
+  // IntersectionObserver for infinite scroll
+  useEffect(()=>{
+    const el=sentinelRef.current;
+    if(!el)return;
+    const obs=new IntersectionObserver(entries=>{
+      if(entries[0].isIntersecting)loadMore();
+    },{rootMargin:'400px'});
+    obs.observe(el);
+    return()=>obs.disconnect();
+  },[loadMore]);
 
   const handleSort=(key)=>{
     if(sortCol===key){setSortDir(sortDir==='desc'?'asc':'desc')}
@@ -406,18 +550,36 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     setOffset(0);
   };
 
-  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setStartDate('');setEndDate('');setOffset(0)};
-  const hasFilters=host||browser||visitSource||osPlatform||tag||transType||startDate||endDate;
-  const total=results?.total||0, rows=results?.results||[];
+  const addExclude=(h)=>{if(h&&!excludeHosts.includes(h))setExcludeHosts(prev=>[...prev,h])};
+  const removeExclude=(h)=>setExcludeHosts(prev=>prev.filter(x=>x!==h));
+  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setStartDate('');setEndDate('');setExcludeHosts([]);setOffset(0)};
+  const hasFilters=host||browser||visitSource||osPlatform||tag||transType||startDate||endDate||excludeHosts.length;
+  const total=results?.total||0, rows=allRows;
 
   // Column definitions for sortable headers
   const COL_NUM = 10;
 
+  const modePlaceholders={
+    fts:'FTS5: "google maps", title:news, dns_host:github',
+    contains:'Substring match: matches anywhere in URL, title, host, query, tags',
+    regex:'Regex: \\.tk$, login.*admin, https?://10\\., (?i)password'
+  };
+  const modeHints={
+    fts:'Supports AND, OR, NOT, "quoted phrases", column:prefix queries',
+    contains:'Case-insensitive substring match across all text fields',
+    regex:'Python regex (re.search) across URL, title, host, query string, tags, unfurl'
+  };
+
   return(<div>
     <div className="search-wrap">
       <span className="search-ico">&#x1F50D;</span>
-      <input className="search-in" placeholder='Search visits (FTS5: "google maps", title:news, dns_host:github)' value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
-      <div className="search-hint">Supports AND, OR, NOT, "quoted phrases", column:prefix queries</div>
+      <input className="search-in" placeholder={modePlaceholders[searchMode]} value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
+      <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
+        <span style={{fontFamily:'var(--mono)',fontSize:'.62rem',color:'var(--txt-2)'}}>Mode:</span>
+        {['fts','contains','regex'].map(m=><button key={m} className="decode-btn" style={searchMode===m?{borderColor:'var(--accent)',color:'var(--accent)',background:'var(--accent-dim)'}:{}} onClick={()=>{setSearchMode(m);setOffset(0)}}>{m==='fts'?'FTS5':m==='contains'?'Contains':'Regex'}</button>)}
+        <span className="search-hint" style={{margin:0}}>{modeHints[searchMode]}</span>
+      </div>
+      {searchError&&<div style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.72rem',marginTop:4}}>{searchError}</div>}
     </div>
     <div className="filters">
       <input className="f-in" placeholder="host..." value={host} onChange={e=>{setHost(e.target.value);setOffset(0)}} onFocus={loadFilters} style={{width:150}}/>
@@ -438,6 +600,9 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
         {(filterOpts?.transition_type||['typed','link','bookmark','reload','form_submit','redirect_permanent','redirect_temporary']).map(t=><option key={t} value={t}>{t}</option>)}
       </select>
       {tag&&<span className="badge b-tag" style={{cursor:'pointer'}} onClick={()=>{setTag('');setOffset(0)}}>{tag} x</span>}
+      {excludeHosts.length>0&&<div className="excl-chips"><span style={{fontFamily:'var(--mono)',fontSize:'.64rem',color:'var(--txt-2)'}}>Excluding:</span>
+        {excludeHosts.map(h=><span key={h} className="excl-chip" onClick={()=>removeExclude(h)}>{h} x</span>)}
+      </div>}
     </div>
     <div className="filters">
       <label style={{fontFamily:'var(--mono)',fontSize:'.68rem',color:'var(--txt-2)'}}>From:</label>
@@ -469,7 +634,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
         <tr onClick={()=>setExpanded(expanded===r.id?null:r.id)} style={{cursor:'pointer'}}>
           <td className="cell-t">{r.visit_time_utc?.replace('T',' ').replace('Z','')}</td>
           <td><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></td>
-          <td><span className="cell-h" onClick={e=>{e.stopPropagation();setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</span></td>
+          <td><span className="cell-h" onClick={e=>{e.stopPropagation();setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</span>{r.dns_host&&<span style={{cursor:'pointer',color:'var(--red)',fontSize:'.6rem',marginLeft:3,opacity:.5}} title={'Exclude '+r.dns_host} onClick={e=>{e.stopPropagation();addExclude(r.dns_host)}}>&#x2715;</span>}</td>
           <td className="cell-tl" title={r.title}>{r.title}</td>
           <td className="cell-u" title={r.full_url}>{r.full_url}</td>
           <td className="cell-t" style={{textAlign:'right'}}>{r.full_url?.length}</td>
@@ -526,15 +691,30 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
               }}>{u.value}</span>
             </React.Fragment>)}
           </>}
+          <span className="det-k" style={{gridColumn:'1/-1',textAlign:'left',marginTop:8,borderTop:'1px solid var(--border)',paddingTop:8,color:'var(--purple)'}}>DECODE STRING</span>
+          <span className="det-v" style={{display:'none'}}/>
+          <div style={{gridColumn:'1/-1'}}>
+            <div className="decode-panel">
+              <textarea className="decode-in" rows={2} placeholder="Paste a base64, hex, URL-encoded, or JWT string to decode..." value={decodeInput} onChange={e=>setDecodeInput(e.target.value)} onClick={e=>e.stopPropagation()}/>
+              <div className="decode-btns">
+                <button className="decode-btn" onClick={e=>{e.stopPropagation();setDecodeInput(r.full_url)}}>Load URL</button>
+                <button className="decode-btn" onClick={e=>{e.stopPropagation();setDecodeInput(r.query_string_decoded||'')}}>Load Query</button>
+                <button className="decode-btn" onClick={e=>{e.stopPropagation();setDecodeInput('')}}>Clear</button>
+              </div>
+              {decodeInput&&tryDecode(decodeInput).map((d,i)=><div key={i} style={{marginBottom:4}}>
+                <span style={{color:'var(--txt-2)',fontSize:'.65rem'}}>{d.method}:</span>
+                <div className="decode-result">{d.value}</div>
+              </div>)}
+              {decodeInput&&tryDecode(decodeInput).length===0&&<div style={{color:'var(--txt-2)',fontSize:'.65rem',fontStyle:'italic'}}>No decodable content detected</div>}
+            </div>
+          </div>
         </div></td></tr>}
       </React.Fragment>)}
     </tbody></table></div>)}
 
-    {total>PAGE&&<div className="pgn">
-      <button className="pg-btn" disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-PAGE))}>Prev</button>
-      <span className="f-meta">{offset+1}-{Math.min(offset+PAGE,total)} of {total.toLocaleString()}</span>
-      <button className="pg-btn" disabled={offset+PAGE>=total} onClick={()=>setOffset(offset+PAGE)}>Next</button>
-    </div>}
+    <div ref={sentinelRef} className="scroll-sentinel"/>
+    {loading&&rows.length>0&&<div style={{textAlign:'center',padding:'12px'}}><Spin/><span className="f-meta">Loading more...</span></div>}
+    {rows.length>0&&<div className="f-meta" style={{textAlign:'center',padding:'8px 0'}}>{rows.length} of {total.toLocaleString()} loaded</div>}
   </div>);
 }
 

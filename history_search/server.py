@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import pkgutil
+import re
 import secrets
 import shutil
 import sqlite3
@@ -190,10 +191,21 @@ def run_pipeline(index_db: str, source_path: Path,
 # Flask helpers
 # ---------------------------------------------------------------------------
 
+def _regexp(pattern, value):
+    """SQLite REGEXP function implementation."""
+    if value is None:
+        return False
+    try:
+        return re.search(pattern, value) is not None
+    except re.error:
+        return False
+
+
 def _get_db():
     if "db" not in g:
         g.db = sqlite3.connect(g.db_path)
         g.db.row_factory = sqlite3.Row
+        g.db.create_function("REGEXP", 2, _regexp)
     return g.db
 
 
@@ -210,13 +222,35 @@ FILTER_COLUMNS = {
 }
 
 
-def _build_where(filters: Dict[str, Optional[str]], fts_q: str = ""):
-    """Build WHERE clause from filters and optional FTS query."""
+SEARCH_COLS = ("v.full_url", "v.title", "v.dns_host",
+               "v.query_string_decoded", "v.tags", "v.unfurl")
+
+
+def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
+                 search_mode: str = "fts"):
+    """Build WHERE clause from filters and optional search query.
+
+    search_mode: "fts" (FTS5 MATCH), "contains" (LIKE substring),
+                 "regex" (REGEXP).
+    """
     clauses, params = [], []
 
     if fts_q:
-        clauses.append(f"{TABLE_FTS} MATCH ?")
-        params.append(fts_q)
+        if search_mode == "regex":
+            subs = []
+            for col in SEARCH_COLS:
+                subs.append(f"{col} REGEXP ?")
+                params.append(fts_q)
+            clauses.append("(" + " OR ".join(subs) + ")")
+        elif search_mode == "contains":
+            subs = []
+            for col in SEARCH_COLS:
+                subs.append(f"{col} LIKE ?")
+                params.append(f"%{fts_q}%")
+            clauses.append("(" + " OR ".join(subs) + ")")
+        else:
+            clauses.append(f"{TABLE_FTS} MATCH ?")
+            params.append(fts_q)
 
     for param_name, col_expr in FILTER_COLUMNS.items():
         v = filters.get(param_name)
@@ -229,6 +263,14 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = ""):
     if tag:
         clauses.append("v.tags LIKE ?")
         params.append(f'%"{tag}"%')
+
+    # Domain exclusion filter (comma-separated list)
+    exclude_host = filters.get("exclude_host")
+    if exclude_host:
+        hosts = [h.strip() for h in exclude_host.split(",") if h.strip()]
+        if hosts:
+            clauses.append("v.dns_host NOT IN (" + ",".join("?" * len(hosts)) + ")")
+            params.extend(hosts)
 
     # Date range
     start = filters.get("start")
@@ -245,7 +287,7 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = ""):
 
 def _get_filters() -> Dict[str, Optional[str]]:
     """Extract filter parameters from request args."""
-    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end"]
+    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end", "exclude_host"]
     return {k: request.args.get(k) for k in keys}
 
 
@@ -275,16 +317,34 @@ def index():
 
 @app.route("/api/search")
 def api_search():
-    """Full-text search with filters and pagination."""
+    """Full-text search with filters and pagination.
+
+    Supports three search modes via ?mode= parameter:
+      fts      — FTS5 MATCH (default). Prefix, boolean, column queries.
+      contains — Substring match (LIKE %term%). Matches anywhere in string.
+      regex    — Python regex (re.search) across URL, title, host, query, tags.
+    """
     db = _get_db()
     q = request.args.get("q", "").strip()
+    mode = request.args.get("mode", "fts")
+    if mode not in ("fts", "contains", "regex"):
+        mode = "fts"
     limit = min(int(request.args.get("limit", DEFAULT_SEARCH_LIMIT)), MAX_SEARCH_LIMIT)
     offset = int(request.args.get("offset", 0))
-    sort = request.args.get("sort", "rank" if q else "time")
+    sort = request.args.get("sort", "rank" if q and mode == "fts" else "time")
     sort_dir = request.args.get("sort_dir", "desc").upper()
     if sort_dir not in ("ASC", "DESC"):
         sort_dir = "DESC"
     f = _get_filters()
+
+    # Validate regex before running query
+    if mode == "regex" and q:
+        try:
+            re.compile(q)
+        except re.error as exc:
+            return jsonify({"error": f"Invalid regex: {exc}",
+                            "total": 0, "limit": limit, "offset": 0,
+                            "results": []}), 400
 
     # Build ORDER BY clause
     SORT_MAP = {
@@ -300,8 +360,9 @@ def api_search():
         "file_source": f"v.source_db_path {sort_dir}",
     }
 
-    if q:
-        w, p = _build_where(f, fts_q=q)
+    use_fts = q and mode == "fts"
+    if use_fts:
+        w, p = _build_where(f, fts_q=q, search_mode="fts")
         order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
                f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
@@ -309,7 +370,7 @@ def api_search():
         csql = (f"SELECT COUNT(*) FROM {TABLE_FTS} fts "
                 f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid WHERE {w}")
     else:
-        w, p = _build_where(f)
+        w, p = _build_where(f, fts_q=q if q else "", search_mode=mode)
         order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
                f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
@@ -488,6 +549,7 @@ def api_browse():
                     "path": str(entry),
                     "is_dir": entry.is_dir(),
                     "size": stat.st_size if not entry.is_dir() else None,
+                    "mtime": stat.st_mtime,
                     "ingestable": (
                         entry.is_dir()
                         or entry.suffix.lower() in (".7z", ".zip", ".tar", ".gz", ".tgz")
@@ -503,6 +565,7 @@ def api_browse():
         "path": str(target),
         "parent": str(target.parent) if target != target.parent else None,
         "entries": entries,
+        "cwd": os.getcwd(),
     })
 
 
