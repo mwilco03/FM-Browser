@@ -33,6 +33,10 @@ def main():
         "-o", "--output", default="fm-browser.pyz",
         help="Output filename (default: fm-browser.pyz)",
     )
+    parser.add_argument(
+        "-r", "--requirements",
+        help="Pinned requirements file (e.g. requirements-build.txt) for reproducible builds",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -43,16 +47,22 @@ def main():
         shutil.copytree(ROOT / "history_search", staging / "history_search")
 
         # Install dependencies into staging dir
-        deps = ["flask"]
-        if args.portable:
-            deps.extend(["py7zr", "rarfile"])
-
-        subprocess.check_call([
+        pip_cmd = [
             sys.executable, "-m", "pip", "install",
             "--target", str(staging),
             "--quiet",
-            *deps,
-        ])
+        ]
+
+        if args.requirements:
+            # Use pinned requirements file for reproducible builds
+            pip_cmd.extend(["-r", args.requirements])
+        else:
+            deps = ["flask"]
+            if args.portable:
+                deps.extend(["py7zr", "rarfile"])
+            pip_cmd.extend(deps)
+
+        subprocess.check_call(pip_cmd)
 
         # Write __main__.py entry point
         (staging / "__main__.py").write_text(
