@@ -252,7 +252,8 @@ def unfurl_url(url: str) -> List[Dict[str, str]]:
     if ved and host and "google" in host:
         findings.append({"type": "google_ved", "key": "ved", "value": f"(tracking token, {len(ved)} chars)"})
 
-    return findings
+    # Safety: cap total findings to prevent adversarial URLs from bloating DB
+    return findings[:_MAX_UNFURL_FINDINGS]
 
 
 def _try_parse_timestamp(val: str) -> str:
@@ -378,17 +379,24 @@ def _decode_protobuf_url(text: str) -> List[Dict[str, str]]:
 # Schemaless protobuf binary decoder (like blackboxprotobuf, zero deps)
 # ---------------------------------------------------------------------------
 
+_MAX_PROTOBUF_INPUT = 64 * 1024  # 64 KB max input to protobuf decoder
+_MAX_PROTOBUF_FIELDS = 200       # max fields to extract per level
+_MAX_UNFURL_FINDINGS = 50        # max findings per URL
+
+
 def decode_protobuf_binary(data: bytes, depth: int = 0) -> List[Dict[str, Any]]:
     """Decode raw protobuf wire format without a schema.
 
     Like blackboxprotobuf: interprets field numbers and wire types,
     recursively decodes nested messages, extracts strings/ints/floats.
     """
-    if depth > 5:
+    if depth > 5 or len(data) > _MAX_PROTOBUF_INPUT:
         return []
     fields = []
     pos = 0
     while pos < len(data):
+        if len(fields) >= _MAX_PROTOBUF_FIELDS:
+            break
         try:
             # Read varint tag
             tag, pos = _read_varint(data, pos)

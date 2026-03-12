@@ -9,6 +9,7 @@ import os
 import sqlite3
 import tempfile
 import sys
+from pathlib import Path
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -501,6 +502,70 @@ def run_tests():
         else:
             print(f"[FAIL] POST /api/ingest clear — {r.status_code}")
             failed += 1
+
+        # ---------------------------------------------------------------
+        # Security: API token enforcement
+        # ---------------------------------------------------------------
+        import history_search.server as srv
+        old_token = srv.API_TOKEN
+        srv.API_TOKEN = "test-secret-token"
+        try:
+            # Without token → 401
+            r = client.post("/api/clear")
+            if r.status_code == 401:
+                print("[PASS] POST /api/clear — 401 without token")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/clear no token — expected 401, got {r.status_code}")
+                failed += 1
+
+            # With wrong token → 401
+            r = client.post("/api/clear", headers={"X-API-Token": "wrong"})
+            if r.status_code == 401:
+                print("[PASS] POST /api/clear — 401 with wrong token")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/clear wrong token — expected 401, got {r.status_code}")
+                failed += 1
+
+            # With correct token → 200
+            r = client.post("/api/clear", headers={"X-API-Token": "test-secret-token"})
+            if r.status_code == 200:
+                print("[PASS] POST /api/clear — 200 with correct token")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/clear correct token — expected 200, got {r.status_code}")
+                failed += 1
+
+            # Token via query param
+            r = client.post("/api/rebuild-fts?token=test-secret-token")
+            if r.status_code == 200:
+                print("[PASS] POST /api/rebuild-fts — 200 with token in query param")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/rebuild-fts token query — expected 200, got {r.status_code}")
+                failed += 1
+        finally:
+            srv.API_TOKEN = old_token
+
+        # ---------------------------------------------------------------
+        # Security: Browse root restriction
+        # ---------------------------------------------------------------
+        old_roots = srv.BROWSE_ROOTS
+        srv.BROWSE_ROOTS = [Path("/nonexistent_root_xyz")]
+        try:
+            r = client.get("/api/browse?path=/tmp")
+            if r.status_code == 403:
+                print("[PASS] GET /api/browse — 403 outside allowed roots")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/browse root restrict — expected 403, got {r.status_code}")
+                failed += 1
+        finally:
+            srv.BROWSE_ROOTS = old_roots
+
+        # Re-seed for final state
+        seed_db(db_path)
 
     finally:
         os.unlink(db_path)

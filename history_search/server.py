@@ -20,9 +20,11 @@ import json
 import logging
 import os
 import pkgutil
+import secrets
 import shutil
 import sqlite3
 import tempfile
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +42,40 @@ from .pipeline.ingest import discover_databases, ingest_database
 LOG = logging.getLogger("history_search")
 
 app = Flask(__name__, static_folder="static")
+
+# ---------------------------------------------------------------------------
+# Security: API token for mutating endpoints, browse path restriction
+# ---------------------------------------------------------------------------
+
+# Generated once at startup; printed to console for the responder to use.
+# Read-only endpoints (search, visit, aggregate, filters, heatmap) are open.
+API_TOKEN: Optional[str] = None  # Set in main()
+
+# Restrict /api/browse to these root paths (set via --browse-root)
+BROWSE_ROOTS: List[Path] = []  # Empty = unrestricted (legacy default)
+
+
+def require_token(fn):
+    """Decorator: reject mutating requests without a valid API token."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if API_TOKEN is None:
+            return fn(*args, **kwargs)  # auth disabled (e.g. testing)
+        token = request.headers.get("X-API-Token") or request.args.get("token")
+        if token != API_TOKEN:
+            return jsonify({"error": "unauthorized — supply X-API-Token header"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def _is_within_browse_roots(target: Path) -> bool:
+    """Check if target is within any allowed browse root."""
+    if not BROWSE_ROOTS:
+        return True  # unrestricted
+    resolved = target.resolve()
+    return any(resolved == root or str(resolved).startswith(str(root) + os.sep)
+               for root in BROWSE_ROOTS)
+
 
 # ---------------------------------------------------------------------------
 # Full pipeline orchestration
@@ -405,6 +441,9 @@ def api_browse():
     """Browse server filesystem for file picker."""
     target = request.args.get("path", "/")
     target = Path(target).resolve()
+    if not _is_within_browse_roots(target):
+        return jsonify({"error": "path outside allowed roots", "path": str(target),
+                        "allowed_roots": [str(r) for r in BROWSE_ROOTS]}), 403
     if not target.exists():
         return jsonify({"error": "path not found", "path": str(target)}), 404
     if not target.is_dir():
@@ -440,6 +479,7 @@ def api_browse():
 
 
 @app.route("/api/clear", methods=["POST"])
+@require_token
 def api_clear():
     """Wipe all visit data and ingest log, keeping schema intact."""
     db = _get_db()
@@ -451,6 +491,7 @@ def api_clear():
 
 
 @app.route("/api/ingest", methods=["POST"])
+@require_token
 def api_ingest():
     """Accept archive/directory path and run the full pipeline."""
     body = request.get_json(silent=True) or {}
@@ -475,6 +516,7 @@ def api_ingest():
 
 
 @app.route("/api/reingest", methods=["POST"])
+@require_token
 def api_reingest():
     """Re-run classification (Stage 3) and rebuild FTS index."""
     db = _get_db()
@@ -501,6 +543,7 @@ def api_reingest():
 
 
 @app.route("/api/rebuild-fts", methods=["POST"])
+@require_token
 def api_rebuild_fts():
     """Rebuild the FTS5 index."""
     rebuild_fts(g.db_path)
@@ -518,12 +561,39 @@ def main():
     p.add_argument("--db", default="history_index.db")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--no-auth", action="store_true",
+                   help="Disable API token requirement (NOT recommended)")
+    p.add_argument("--browse-root", action="append", default=[],
+                   help="Restrict /api/browse to these directories (repeatable)")
     args = p.parse_args()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s | %(name)s | %(message)s"
     )
+
+    # Security setup
+    global API_TOKEN, BROWSE_ROOTS
+    if not args.no_auth:
+        API_TOKEN = secrets.token_urlsafe(32)
+        LOG.info("=" * 60)
+        LOG.info("API Token (required for POST endpoints):")
+        LOG.info("  %s", API_TOKEN)
+        LOG.info("Pass via X-API-Token header or ?token= query param")
+        LOG.info("=" * 60)
+    else:
+        API_TOKEN = None
+        LOG.warning("Auth disabled (--no-auth). Mutating endpoints are UNPROTECTED.")
+
+    if args.browse_root:
+        BROWSE_ROOTS = [Path(r).resolve() for r in args.browse_root]
+        LOG.info("Browse restricted to: %s", [str(r) for r in BROWSE_ROOTS])
+    else:
+        LOG.warning("No --browse-root set. /api/browse can access entire filesystem.")
+
+    if args.host != "127.0.0.1":
+        LOG.warning("Binding to %s — server exposed on network!", args.host)
+
     db_path = os.path.abspath(args.db)
 
     # Initialize schema

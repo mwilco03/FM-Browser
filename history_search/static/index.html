@@ -186,16 +186,21 @@ const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',unknown:'b-unknown'};
 const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',unknown:'?'};
 
+// API token stored in sessionStorage; set via Security panel in Ingest tab
+function getToken(){return sessionStorage.getItem('api_token')||''}
+function setToken(t){sessionStorage.setItem('api_token',t)}
+function authHeaders(extra={}){const t=getToken();const h={...extra};if(t)h['X-API-Token']=t;return h}
+
 const api = {
   search: p => fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
   visit: id => fetch('/api/visit/'+id).then(r=>r.json()),
   aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(r=>r.json()),
   filters: () => fetch('/api/filters').then(r=>r.json()),
   heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
-  ingest: (path, clear) => fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path, clear: !!clear})}).then(r=>r.json()),
-  reingest: () => fetch('/api/reingest',{method:'POST'}).then(r=>r.json()),
-  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(r=>r.json()),
-  clear: () => fetch('/api/clear',{method:'POST'}).then(r=>r.json()),
+  ingest: (path, clear) => fetch('/api/ingest',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({path, clear: !!clear})}).then(r=>r.json()),
+  reingest: () => fetch('/api/reingest',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  clear: () => fetch('/api/clear',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
   browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(r=>r.json()),
 };
 
@@ -666,6 +671,8 @@ function IngestView(){
   const[filterInfo,setFilterInfo]=useState(null);
   const[showPicker,setShowPicker]=useState(false);
   const[clearFirst,setClearFirst]=useState(false);
+  const[token,setTokenLocal]=useState(getToken());
+  const handleTokenChange=(e)=>{setTokenLocal(e.target.value);setToken(e.target.value)};
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
 
@@ -707,6 +714,15 @@ function IngestView(){
 
   return(<div>
     {showPicker&&<FilePicker onSelect={(p)=>{setPath(p);setShowPicker(false)}} onClose={()=>setShowPicker(false)}/>}
+
+    <div className="ing-panel" style={{marginBottom:14}}>
+      <div className="card-h">API Token</div>
+      <p style={{color:'var(--txt-2)',fontSize:'.72rem',marginBottom:6}}>
+        Paste the API token printed at server startup. Required for ingest, clear, and reclassify operations.
+      </p>
+      <input className="ing-in" type="password" placeholder="Paste API token from server console" value={token} onChange={handleTokenChange}
+             style={{maxWidth:420,fontFamily:'var(--mono)',fontSize:'.72rem'}}/>
+    </div>
 
     <div className="ing-panel">
       <div className="card-h">Ingest Archive or Directory</div>
