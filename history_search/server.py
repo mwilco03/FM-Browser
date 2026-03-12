@@ -496,6 +496,7 @@ def api_browse():
                     "path": str(entry),
                     "is_dir": entry.is_dir(),
                     "size": stat.st_size if not entry.is_dir() else None,
+                    "mtime": stat.st_mtime,
                     "ingestable": (
                         entry.is_dir()
                         or entry.suffix.lower() in (".7z", ".zip", ".tar", ".gz", ".tgz")
@@ -511,6 +512,7 @@ def api_browse():
         "path": str(target),
         "parent": str(target.parent) if target != target.parent else None,
         "entries": entries,
+        "cwd": os.getcwd(),
     })
 
 
