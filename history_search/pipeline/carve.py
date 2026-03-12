@@ -198,6 +198,17 @@ def carve_urls_from_pages(pages: List[bytes]) -> List[Dict[str, str]]:
                 url = "".join(cleaned).rstrip(".,;:!?)'\"")  # strip trailing punctuation
                 if len(url) < 10 or "://" not in url:
                     continue
+                # Validate: must have a real hostname with at least one dot
+                try:
+                    p = urlparse(url)
+                    host = p.hostname or ""
+                    if not host or "." not in host:
+                        continue
+                    # Reject if hostname has non-ASCII or control chars
+                    if not all(c.isascii() and c.isprintable() for c in host):
+                        continue
+                except Exception:
+                    continue
             except Exception:
                 continue
 
@@ -270,8 +281,11 @@ def _find_nearby_title(data: bytes, url_offset: int) -> str:
         chunks = re.split(r'[\x00-\x1f]+', text)
         for chunk in reversed(chunks):
             chunk = chunk.strip()
-            # A title should be at least 3 chars and not look like a URL
-            if len(chunk) >= 3 and not chunk.startswith("http") and not chunk.startswith("/"):
+            # A title should be at least 3 chars, mostly printable, not a URL
+            if (len(chunk) >= 3 and not chunk.startswith("http")
+                    and not chunk.startswith("/")
+                    and sum(c.isalnum() or c == ' ' for c in chunk) > len(chunk) * 0.5
+                    and '\ufffd' not in chunk):  # reject replacement chars
                 return chunk[:256]
     except Exception:
         pass

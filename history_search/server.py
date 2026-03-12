@@ -230,6 +230,14 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = ""):
         clauses.append("v.tags LIKE ?")
         params.append(f'%"{tag}"%')
 
+    # Domain exclusion filter (comma-separated list)
+    exclude_host = filters.get("exclude_host")
+    if exclude_host:
+        hosts = [h.strip() for h in exclude_host.split(",") if h.strip()]
+        if hosts:
+            clauses.append("v.dns_host NOT IN (" + ",".join("?" * len(hosts)) + ")")
+            params.extend(hosts)
+
     # Date range
     start = filters.get("start")
     if start:
@@ -245,7 +253,7 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = ""):
 
 def _get_filters() -> Dict[str, Optional[str]]:
     """Extract filter parameters from request args."""
-    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end"]
+    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end", "exclude_host"]
     return {k: request.args.get(k) for k in keys}
 
 
