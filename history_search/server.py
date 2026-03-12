@@ -15,16 +15,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
+import pkgutil
 import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_file, send_from_directory
 
 from .pipeline.classify import classify_batch
 from .pipeline.constants import DEFAULT_SEARCH_LIMIT, INTERVAL_STRFTIME, MAX_SEARCH_LIMIT
@@ -196,7 +198,15 @@ def _teardown(exc=None):
 
 @app.route("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    # send_from_directory fails inside a .pyz zipapp because the static
+    # folder path points into the zip archive.  Fall back to pkgutil which
+    # reads from zip-importable packages.
+    if app.static_folder and os.path.isdir(app.static_folder):
+        return send_from_directory(app.static_folder, "index.html")
+    data = pkgutil.get_data("history_search", "static/index.html")
+    if data is None:
+        return "index.html not found", 404
+    return send_file(io.BytesIO(data), mimetype="text/html")
 
 
 @app.route("/api/search")
