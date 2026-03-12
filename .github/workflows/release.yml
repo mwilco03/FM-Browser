@@ -1,0 +1,76 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+  ARTIFACT_NAME: "fm-browser"
+  PYZ_FILENAME: "fm-browser.pyz"
+  WHL_DIR: "dist"
+  VERSION: "v0.0.${{ github.run_number }}"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install build dependencies
+        run: pip install --upgrade pip setuptools wheel build
+
+      - name: Build zipapp (.pyz) — portable single-file distribution
+        run: python scripts/build_zipapp.py --portable -o "${{ env.PYZ_FILENAME }}"
+
+      - name: Build wheel (.whl) — pip-installable distribution
+        run: python -m build --wheel --outdir "${{ env.WHL_DIR }}"
+
+      - name: Upload zipapp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-pyz
+          path: ${{ env.PYZ_FILENAME }}
+          if-no-files-found: error
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-whl
+          path: ${{ env.WHL_DIR }}/*.whl
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download zipapp artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-pyz
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-whl
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: "Release ${{ env.VERSION }}"
+          body: "${{ github.event.head_commit.message }}"
+          files: |
+            ${{ env.PYZ_FILENAME }}
+            *.whl
