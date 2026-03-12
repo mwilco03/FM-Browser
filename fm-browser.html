@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forensic History Search</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-0:#08090c; --bg-1:#0e1017; --bg-2:#151720; --bg-3:#1e2030; --bg-4:#272a3a;
+  --border:#2a2d40; --border-hi:#3d4160;
+  --txt-0:#e4e6f0; --txt-1:#9da2be; --txt-2:#636887;
+  --accent:#5b8aff; --accent-dim:rgba(91,138,255,.12);
+  --local:#34d399; --local-dim:rgba(52,211,153,.1);
+  --synced:#f59e0b; --synced-dim:rgba(245,158,11,.1);
+  --red:#ef4444; --red-dim:rgba(239,68,68,.1);
+  --purple:#a78bfa; --purple-dim:rgba(167,139,250,.1);
+  --mono:'JetBrains Mono',monospace; --sans:'Outfit',system-ui,sans-serif;
+  --r:5px; --r-lg:8px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:13.5px}
+body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-height:100vh;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg-1)}
+::-webkit-scrollbar-thumb{background:var(--bg-3);border-radius:3px}
+
+.shell{max-width:1480px;margin:0 auto;padding:20px 28px}
+
+/* Header */
+.hdr{display:flex;align-items:center;gap:14px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.hdr-logo{font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--accent);letter-spacing:-.5px}
+.hdr-logo span{color:var(--txt-2);font-weight:400}
+.hdr-meta{margin-left:auto;font-family:var(--mono);font-size:.72rem;color:var(--txt-2)}
+
+/* Tabs */
+.tabs{display:flex;gap:2px;background:var(--bg-1);padding:3px;border-radius:var(--r);margin-bottom:20px}
+.tab{font-family:var(--sans);font-size:.8rem;font-weight:500;padding:7px 16px;border-radius:4px;border:none;background:0;color:var(--txt-2);cursor:pointer;transition:.15s}
+.tab:hover{color:var(--txt-1)}
+.tab.on{background:var(--bg-3);color:var(--txt-0);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+
+/* Search */
+.search-wrap{position:relative;margin-bottom:14px}
+.search-in{width:100%;font-family:var(--mono);font-size:.9rem;padding:13px 16px 13px 42px;background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);color:var(--txt-0);outline:0;transition:.2s}
+.search-in::placeholder{color:var(--txt-2)}
+.search-in:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.search-ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--txt-2);font-size:.95rem;pointer-events:none}
+
+/* Filters */
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+.f-sel,.f-in{font-family:var(--mono);font-size:.73rem;padding:5px 9px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-1);outline:0}
+.f-sel:focus,.f-in:focus{border-color:var(--accent)}
+.f-sel option{background:var(--bg-2)}
+.f-meta{font-family:var(--mono);font-size:.72rem;color:var(--txt-2);margin-left:auto}
+.f-meta em{color:var(--synced);font-style:normal}
+
+/* Origin badges */
+.badge{font-family:var(--mono);font-size:.68rem;padding:2px 7px;border-radius:3px;display:inline-block;font-weight:500}
+.badge-local{background:var(--local-dim);color:var(--local)}
+.badge-synced{background:var(--synced-dim);color:var(--synced)}
+.badge-unknown{background:var(--bg-3);color:var(--txt-2)}
+.badge-chrome{background:var(--local-dim);color:var(--local)}
+.badge-safari{background:var(--accent-dim);color:var(--accent)}
+.badge-firefox{background:var(--synced-dim);color:var(--synced)}
+.badge-macos{background:var(--purple-dim);color:var(--purple)}
+.badge-windows{background:var(--accent-dim);color:var(--accent)}
+.badge-linux{background:var(--local-dim);color:var(--local)}
+.badge-tag{background:var(--red-dim);color:var(--red);cursor:pointer}
+
+/* Table */
+.tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:1}
+.tbl td{padding:7px 10px;border-bottom:1px solid rgba(42,45,64,.4);vertical-align:top;line-height:1.5}
+.tbl tr:hover td{background:var(--bg-1)}
+.cell-t{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);white-space:nowrap}
+.cell-h{font-family:var(--mono);font-size:.74rem;color:var(--synced);cursor:pointer}
+.cell-h:hover{text-decoration:underline}
+.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-tl{color:var(--txt-0);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-q{font-family:var(--mono);font-size:.68rem;color:var(--local);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-tr{font-family:var(--mono);font-size:.68rem;color:var(--txt-2)}
+
+/* Detail expand */
+.det td{background:var(--bg-1)!important;padding:12px 18px!important}
+.det-grid{display:grid;grid-template-columns:110px 1fr;gap:3px 12px;font-size:.75rem}
+.det-k{font-family:var(--mono);color:var(--txt-2);text-align:right}
+.det-v{font-family:var(--mono);color:var(--txt-0);word-break:break-all}
+
+/* Pagination */
+.pgn{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.pg-btn{font-family:var(--mono);font-size:.74rem;padding:5px 13px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg-2);color:var(--txt-1);cursor:pointer}
+.pg-btn:disabled{opacity:.3;cursor:default}
+.pg-btn:hover:not(:disabled){border-color:var(--accent);color:var(--txt-0)}
+
+/* Cards */
+.dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px}
+.card-h{font-family:var(--mono);font-size:.7rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:10px}
+.stat-row{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:18px}
+.stat-big{font-family:var(--mono);font-size:1.8rem;font-weight:700;color:var(--txt-0);line-height:1}
+.stat-sm{font-size:.74rem;color:var(--txt-2);margin-top:3px}
+
+/* Bars */
+.bar-item{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:.76rem}
+.bar-lbl{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);min-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.bar-trk{flex:1;height:14px;background:var(--bg-2);border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px;transition:width .4s;min-width:2px}
+.bar-ct{font-family:var(--mono);font-size:.68rem;color:var(--txt-2);min-width:46px}
+
+/* Heatmap */
+.hm-grid{display:grid;grid-template-columns:48px repeat(24,1fr);gap:2px;font-family:var(--mono);font-size:.6rem}
+.hm-cell{aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);font-size:.55rem}
+.hm-lbl{display:flex;align-items:center;justify-content:flex-end;padding-right:6px;color:var(--txt-2);font-size:.65rem}
+.hm-hlbl{display:flex;align-items:center;justify-content:center;color:var(--txt-2);font-size:.6rem}
+
+/* Timeline canvas */
+.tl-canvas{width:100%;height:140px;display:block}
+.tl-ctrls{display:flex;gap:3px;margin-bottom:8px}
+.tl-btn{font-family:var(--mono);font-size:.68rem;padding:3px 10px;border:1px solid var(--border);border-radius:3px;background:0;color:var(--txt-2);cursor:pointer}
+.tl-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* Ingest */
+.ing-panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;margin-bottom:14px}
+.ing-row{display:flex;gap:8px}
+.ing-in{flex:1;font-family:var(--mono);font-size:.82rem;padding:10px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-0);outline:0}
+.ing-btn{font-family:var(--mono);font-size:.78rem;padding:10px 18px;border:none;border-radius:var(--r);background:var(--accent);color:#fff;cursor:pointer;font-weight:500}
+.ing-btn:disabled{opacity:.5}
+
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .6s linear infinite;margin-right:5px;vertical-align:middle}
+@keyframes sp{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:50px 20px;color:var(--txt-2)}
+.empty h3{font-family:var(--mono);font-size:.95rem;color:var(--txt-1);margin-bottom:6px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef,useMemo} = React;
+
+const TABS = {SEARCH:'search',TIMELINE:'timeline',FREQ:'frequency',INTRSTG:'interesting',SOURCES:'sources',INGEST:'ingest'};
+const TAB_LABELS = [
+  [TABS.SEARCH,'Search'],[TABS.TIMELINE,'Timeline'],[TABS.FREQ,'Frequency'],
+  [TABS.INTRSTG,'Interesting'],[TABS.SOURCES,'Sources'],[TABS.INGEST,'Ingest']
+];
+const INTERVALS = ['hour','day','week','month'];
+const PAGE = 50;
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const ORIGIN_CLS = {local:'badge-local',synced:'badge-synced',unknown:'badge-unknown'};
+const BROWSER_CLS = {chrome:'badge-chrome',safari:'badge-safari',firefox:'badge-firefox'};
+const OS_CLS = {macos:'badge-macos',windows:'badge-windows',linux:'badge-linux'};
+
+const api = {
+  search:p=>fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
+  stats:()=>fetch('/api/stats').then(r=>r.json()),
+  hosts:p=>fetch('/api/hosts?'+new URLSearchParams(p)).then(r=>r.json()),
+  timeline:p=>fetch('/api/timeline?'+new URLSearchParams(p)).then(r=>r.json()),
+  heatmap:p=>fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
+  interesting:p=>fetch('/api/interesting?'+new URLSearchParams(p)).then(r=>r.json()),
+  users:()=>fetch('/api/users').then(r=>r.json()),
+  ingest:path=>fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})}).then(r=>r.json()),
+};
+
+function useDebounce(v,ms){
+  const[d,s]=useState(v);
+  useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);
+  return d;
+}
+
+// -- Shared components --
+function Badge({type,cls,children}){return <span className={`badge ${cls||''}`}>{children||type}</span>}
+function Spin(){return <span className="spinner"/>}
+
+function OriginBadge({o}){return <Badge cls={ORIGIN_CLS[o]||'badge-unknown'}>{o}</Badge>}
+function BrowserBadge({b}){return <Badge cls={BROWSER_CLS[b]||''}>{b}</Badge>}
+function OsBadge({o}){return <Badge cls={OS_CLS[o]||''}>{o}</Badge>}
+
+function BarChart({items,maxItems=15,color='var(--accent)'}){
+  const top=items.slice(0,maxItems);
+  const mx=Math.max(...top.map(i=>i.count),1);
+  return <div>{top.map((it,i)=>(
+    <div key={it.label||it.dns_host||i} className="bar-item">
+      <span className="bar-lbl" title={it.label||it.dns_host}>{it.label||it.dns_host}</span>
+      <div className="bar-trk"><div className="bar-fill" style={{width:`${(it.count/mx)*100}%`,background:color}}/></div>
+      <span className="bar-ct">{it.count.toLocaleString()}</span>
+    </div>
+  ))}</div>
+}
+
+function TimelineChart({buckets}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const c=ref.current; if(!c||!buckets.length)return;
+    const ctx=c.getContext('2d'),dpr=devicePixelRatio||1,r=c.getBoundingClientRect();
+    c.width=r.width*dpr;c.height=r.height*dpr;ctx.scale(dpr,dpr);
+    const W=r.width,H=r.height;ctx.clearRect(0,0,W,H);
+    const mx=Math.max(...buckets.map(b=>b.count),1);
+    const bw=Math.max(1,(W-20)/buckets.length-1);
+    buckets.forEach((b,i)=>{
+      const x=10+i*(bw+1),bH=(b.count/mx)*(H-24),y=H-12-bH;
+      ctx.fillStyle='rgba(91,138,255,.7)';ctx.beginPath();ctx.roundRect(x,y,bw,bH,2);ctx.fill();
+    });
+    ctx.fillStyle='#636887';ctx.font='10px JetBrains Mono';
+    ctx.textAlign='left';if(buckets[0])ctx.fillText(buckets[0].bucket,10,H-1);
+    ctx.textAlign='right';const last=buckets[buckets.length-1];if(last)ctx.fillText(last.bucket,W-10,H-1);
+  },[buckets]);
+  return <canvas ref={ref} className="tl-canvas"/>
+}
+
+// -- Heatmap --
+function Heatmap({cells}){
+  const mx=Math.max(...cells.map(c=>c.count),1);
+  const grid=Array.from({length:7},()=>Array(24).fill(0));
+  cells.forEach(c=>{if(c.dow>=0&&c.dow<7&&c.hour>=0&&c.hour<24)grid[c.dow][c.hour]=c.count});
+  const interp=(v)=>{
+    const t=v/mx;
+    if(t===0)return 'var(--bg-2)';
+    const r=Math.round(91+t*(239-91)),g_=Math.round(138+t*(68-138)),b=Math.round(255+t*(68-255));
+    return `rgb(${r},${g_},${b})`;
+  };
+  return(
+    <div className="hm-grid">
+      <div/>
+      {Array.from({length:24},(_,h)=><div key={h} className="hm-hlbl">{h}</div>)}
+      {DAYS.map((day,d)=><React.Fragment key={d}>
+        <div className="hm-lbl">{day}</div>
+        {Array.from({length:24},(_,h)=>{
+          const v=grid[d][h];
+          return <div key={h} className="hm-cell" style={{background:interp(v)}} title={`${day} ${h}:00 — ${v}`}>
+            {v>0?v:''}
+          </div>
+        })}
+      </React.Fragment>)}
+    </div>
+  );
+}
+
+// === SEARCH TAB ===
+function SearchView(){
+  const[q,setQ]=useState('');
+  const[host,setHost]=useState('');
+  const[browser,setBrowser]=useState('');
+  const[origin,setOrigin]=useState('');
+  const[os,setOs]=useState('');
+  const[results,setResults]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[offset,setOffset]=useState(0);
+  const[expanded,setExpanded]=useState(null);
+  const dq=useDebounce(q,300);
+
+  const doSearch=useCallback(async(query,off)=>{
+    setLoading(true);
+    const p={limit:PAGE,offset:off};
+    if(query)p.q=query; if(host)p.host=host; if(browser)p.browser=browser;
+    if(origin)p.origin=origin; if(os)p.os=os;
+    try{setResults(await api.search(p))}catch(e){console.error(e)}
+    setLoading(false);
+  },[host,browser,origin,os]);
+
+  useEffect(()=>{setOffset(0);doSearch(dq,0)},[dq,doSearch]);
+  useEffect(()=>{doSearch(dq,offset)},[offset]);
+
+  const total=results?.total||0, rows=results?.results||[];
+
+  return(<div>
+    <div className="search-wrap">
+      <span className="search-ico">&#x1F50D;</span>
+      <input className="search-in" placeholder='FTS5 search (e.g. "google maps" OR gmail, host:github.com)' value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
+    </div>
+    <div className="filters">
+      <input className="f-in" placeholder="host filter..." value={host} onChange={e=>{setHost(e.target.value);setOffset(0)}} style={{width:160}}/>
+      <select className="f-sel" value={browser} onChange={e=>{setBrowser(e.target.value);setOffset(0)}}>
+        <option value="">All browsers</option><option value="chrome">Chrome</option><option value="safari">Safari</option><option value="firefox">Firefox</option>
+      </select>
+      <select className="f-sel" value={origin} onChange={e=>{setOrigin(e.target.value);setOffset(0)}}>
+        <option value="">Local + Synced</option><option value="local">Local only</option><option value="synced">Synced only</option>
+      </select>
+      <select className="f-sel" value={os} onChange={e=>{setOs(e.target.value);setOffset(0)}}>
+        <option value="">All OS</option><option value="macos">macOS</option><option value="windows">Windows</option><option value="linux">Linux</option>
+      </select>
+      {loading&&<Spin/>}
+      <span className="f-meta"><em>{total.toLocaleString()}</em> results</span>
+    </div>
+    {rows.length===0&&!loading?<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>:(
+    <div style={{overflowX:'auto'}}><table className="tbl"><thead><tr>
+      <th>Time</th><th>Origin</th><th>Host</th><th>Title</th><th>URL</th><th>QS</th><th>Browser</th><th>OS</th><th>Transition</th>
+    </tr></thead><tbody>
+      {rows.map(r=><React.Fragment key={r.id}>
+        <tr onClick={()=>setExpanded(expanded===r.id?null:r.id)} style={{cursor:'pointer'}}>
+          <td className="cell-t">{r.visit_time_utc?.replace('T',' ').replace('Z','')}</td>
+          <td><OriginBadge o={r.visit_origin}/></td>
+          <td><span className="cell-h" onClick={e=>{e.stopPropagation();setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</span></td>
+          <td className="cell-tl" title={r.title}>{r.title}</td>
+          <td className="cell-u" title={r.full_url}>{r.full_url}</td>
+          <td className="cell-q" title={r.query_string}>{r.query_string}</td>
+          <td><BrowserBadge b={r.browser}/></td>
+          <td>{r.host_os&&<OsBadge o={r.host_os}/>}</td>
+          <td className="cell-tr">{r.transition_type}</td>
+        </tr>
+        {expanded===r.id&&<tr className="det"><td colSpan={9}><div className="det-grid">
+          <span className="det-k">URL</span><span className="det-v">{r.full_url}</span>
+          <span className="det-k">Title</span><span className="det-v">{r.title}</span>
+          <span className="det-k">Host</span><span className="det-v">{r.dns_host}</span>
+          <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
+          <span className="det-k">Query</span><span className="det-v">{r.query_string}</span>
+          <span className="det-k">Scheme</span><span className="det-v">{r.url_scheme}{r.url_port?`:${r.url_port}`:''}</span>
+          <span className="det-k">Time</span><span className="det-v">{r.visit_time_utc}</span>
+          <span className="det-k">Origin</span><span className="det-v"><OriginBadge o={r.visit_origin}/></span>
+          <span className="det-k">Transition</span><span className="det-v">{r.transition_type}</span>
+          <span className="det-k">Duration</span><span className="det-v">{r.visit_duration_s>0?`${r.visit_duration_s.toFixed(1)}s`:'-'}</span>
+          <span className="det-k">User</span><span className="det-v">{r.user||'—'}</span>
+          <span className="det-k">Profile</span><span className="det-v">{r.profile_name||'—'}</span>
+          <span className="det-k">OS</span><span className="det-v">{r.host_os}</span>
+          <span className="det-k">Browser</span><span className="det-v">{r.browser}</span>
+          <span className="det-k">Source DB</span><span className="det-v">{r.source_db}</span>
+          {r.interesting&&<><span className="det-k">Flags</span><span className="det-v">{r.interesting.split(',').map(t=><Badge key={t} cls="badge-tag">{t}</Badge>)}</span></>}
+        </div></td></tr>}
+      </React.Fragment>)}
+    </tbody></table></div>)}
+    {total>PAGE&&<div className="pgn">
+      <button className="pg-btn" disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-PAGE))}>← Prev</button>
+      <span className="f-meta">{offset+1}–{Math.min(offset+PAGE,total)} of {total.toLocaleString()}</span>
+      <button className="pg-btn" disabled={offset+PAGE>=total} onClick={()=>setOffset(offset+PAGE)}>Next →</button>
+    </div>}
+  </div>);
+}
+
+// === TIMELINE TAB ===
+function TimelineView(){
+  const[stats,setStats]=useState(null);
+  const[tl,setTl]=useState([]);
+  const[iv,setIv]=useState('day');
+  const[browser,setBrowser]=useState('');
+  const[origin,setOrigin]=useState('');
+  const[loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    setLoading(true);
+    const p={interval:iv};if(browser)p.browser=browser;if(origin)p.origin=origin;
+    Promise.all([api.stats(),api.timeline(p)]).then(([s,t])=>{
+      setStats(s);setTl(t.buckets||[]);setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[iv,browser,origin]);
+
+  if(loading)return<div className="empty"><Spin/> Loading...</div>;
+  if(!stats)return<div className="empty"><h3>No data</h3></div>;
+
+  return(<div>
+    <div className="stat-row">
+      {[['Total',stats.total_visits],['Hosts',stats.unique_hosts],['Users',stats.unique_users]].map(([l,v])=>
+        <div key={l}><div className="stat-big">{(v||0).toLocaleString()}</div><div className="stat-sm">{l}</div></div>
+      )}
+      {stats.earliest&&<div>
+        <div className="stat-big" style={{fontSize:'.95rem'}}>{stats.earliest?.split('T')[0]} → {stats.latest?.split('T')[0]}</div>
+        <div className="stat-sm">Time Range</div>
+      </div>}
+    </div>
+
+    <div className="filters" style={{marginBottom:10}}>
+      <div className="tl-ctrls">{INTERVALS.map(i=><button key={i} className={`tl-btn ${iv===i?'on':''}`} onClick={()=>setIv(i)}>{i}</button>)}</div>
+      <select className="f-sel" value={browser} onChange={e=>setBrowser(e.target.value)}>
+        <option value="">All browsers</option><option value="chrome">Chrome</option><option value="safari">Safari</option><option value="firefox">Firefox</option>
+      </select>
+      <select className="f-sel" value={origin} onChange={e=>setOrigin(e.target.value)}>
+        <option value="">All origins</option><option value="local">Local</option><option value="synced">Synced</option>
+      </select>
+    </div>
+
+    <div className="card" style={{marginBottom:14}}>
+      <div className="card-h">Activity over time</div>
+      {tl.length>0?<TimelineChart buckets={tl}/>:<div style={{color:'var(--txt-2)',padding:16}}>No timeline data</div>}
+    </div>
+
+    <div className="dash">
+      <div className="card"><div className="card-h">Browsers</div>
+        <BarChart items={(stats.browsers||[]).map(b=>({label:b.browser,count:b.count}))} color="var(--local)"/></div>
+      <div className="card"><div className="card-h">Origin (Local vs Synced)</div>
+        <BarChart items={(stats.origin_breakdown||[]).map(b=>({label:b.visit_origin,count:b.count}))} color="var(--synced)"/></div>
+      <div className="card"><div className="card-h">Operating System</div>
+        <BarChart items={(stats.os_breakdown||[]).map(b=>({label:b.host_os||'unknown',count:b.count}))} color="var(--purple)"/></div>
+    </div>
+  </div>);
+}
+
+// === FREQUENCY TAB ===
+function FreqView(){
+  const[hosts,setHosts]=useState([]);
+  const[hm,setHm]=useState([]);
+  const[loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    Promise.all([api.hosts({limit:25}),api.heatmap({})]).then(([h,hmap])=>{
+      setHosts(h.hosts||[]);setHm(hmap.cells||[]);setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[]);
+
+  if(loading)return<div className="empty"><Spin/> Loading...</div>;
+
+  return(<div>
+    <div className="card" style={{marginBottom:14}}>
+      <div className="card-h">Activity Heatmap (day of week × hour of day)</div>
+      {hm.length>0?<Heatmap cells={hm}/>:<div style={{color:'var(--txt-2)',padding:16}}>No data</div>}
+    </div>
+    <div className="card">
+      <div className="card-h">Top Domains</div>
+      <BarChart items={hosts} maxItems={25}/>
+    </div>
+  </div>);
+}
+
+// === INTERESTING STRINGS TAB ===
+function InterestingView(){
+  const[data,setData]=useState(null);
+  const[tag,setTag]=useState('');
+  const[loading,setLoading]=useState(true);
+  const[expanded,setExpanded]=useState(null);
+
+  const load=useCallback(async(t)=>{
+    setLoading(true);
+    try{setData(await api.interesting(t?{tag:t,limit:200}:{limit:200}))}catch(e){}
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{load(tag)},[tag]);
+
+  if(loading)return<div className="empty"><Spin/> Scanning...</div>;
+  if(!data)return<div className="empty"><h3>No data</h3></div>;
+
+  const rows=data.results||[];
+  const tags=data.tag_summary||[];
+
+  return(<div>
+    <div className="card" style={{marginBottom:14}}>
+      <div className="card-h">Forensic Tags {tag&&<span style={{color:'var(--red)'}}>  — filtered: {tag} <button onClick={()=>setTag('')} style={{background:'none',border:'none',color:'var(--accent)',cursor:'pointer',fontFamily:'var(--mono)',fontSize:'.7rem'}}>[clear]</button></span>}</div>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+        {tags.map(t=><span key={t.tag} className="badge badge-tag" onClick={()=>setTag(t.tag)}>{t.tag} ({t.count})</span>)}
+      </div>
+    </div>
+
+    {rows.length===0?<div className="empty"><h3>No interesting strings found</h3></div>:(
+    <div style={{overflowX:'auto'}}><table className="tbl"><thead><tr>
+      <th>Time</th><th>Origin</th><th>Tags</th><th>Host</th><th>URL</th><th>Browser</th><th>User</th>
+    </tr></thead><tbody>
+      {rows.map(r=><React.Fragment key={r.id}>
+        <tr onClick={()=>setExpanded(expanded===r.id?null:r.id)} style={{cursor:'pointer'}}>
+          <td className="cell-t">{r.visit_time_utc?.replace('T',' ').replace('Z','')}</td>
+          <td><OriginBadge o={r.visit_origin}/></td>
+          <td>{r.interesting?.split(',').map(t=><Badge key={t} cls="badge-tag">{t}</Badge>)}</td>
+          <td className="cell-h">{r.dns_host}</td>
+          <td className="cell-u" title={r.full_url} style={{maxWidth:400}}>{r.full_url}</td>
+          <td><BrowserBadge b={r.browser}/></td>
+          <td className="cell-t">{r.user}</td>
+        </tr>
+        {expanded===r.id&&<tr className="det"><td colSpan={7}><div className="det-grid">
+          <span className="det-k">Full URL</span><span className="det-v">{r.full_url}</span>
+          <span className="det-k">Query</span><span className="det-v">{r.query_string}</span>
+          <span className="det-k">Title</span><span className="det-v">{r.title}</span>
+          <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
+          <span className="det-k">Source</span><span className="det-v">{r.source_db}</span>
+        </div></td></tr>}
+      </React.Fragment>)}
+    </tbody></table></div>)}
+  </div>);
+}
+
+// === SOURCES TAB ===
+function SourcesView(){
+  const[stats,setStats]=useState(null);
+  const[users,setUsers]=useState([]);
+  const[loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    Promise.all([api.stats(),api.users()]).then(([s,u])=>{
+      setStats(s);setUsers(u.users||[]);setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[]);
+
+  if(loading)return<div className="empty"><Spin/> Loading...</div>;
+  if(!stats)return<div className="empty"><h3>No data</h3></div>;
+
+  return(<div>
+    <div className="stat-row">
+      {(stats.origin_breakdown||[]).map(o=>
+        <div key={o.visit_origin}><div className="stat-big">{o.count.toLocaleString()}</div><div className="stat-sm"><OriginBadge o={o.visit_origin}/></div></div>
+      )}
+    </div>
+
+    <div className="dash">
+      <div className="card"><div className="card-h">Users × Browser × OS</div>
+        {users.length===0?<div style={{color:'var(--txt-2)'}}>No user data</div>:(
+        <table className="tbl"><thead><tr><th>User</th><th>OS</th><th>Browser</th><th>Visits</th></tr></thead><tbody>
+          {users.map((u,i)=><tr key={i}>
+            <td className="cell-t">{u.user}</td>
+            <td><OsBadge o={u.host_os}/></td>
+            <td><BrowserBadge b={u.browser}/></td>
+            <td className="cell-t">{u.count.toLocaleString()}</td>
+          </tr>)}
+        </tbody></table>)}
+      </div>
+
+      <div className="card"><div className="card-h">Ingestion Log</div>
+        {(stats.ingest_log||[]).length===0?<div style={{color:'var(--txt-2)'}}>Nothing ingested yet</div>:(
+        <table className="tbl"><thead><tr><th>Source</th><th>Browser</th><th>OS</th><th>User</th><th>Rows</th><th>At</th></tr></thead><tbody>
+          {stats.ingest_log.map((e,i)=><tr key={i}>
+            <td className="cell-u" style={{maxWidth:300}} title={e.source_db}>{e.source_db?.split('/').pop()}</td>
+            <td><BrowserBadge b={e.browser}/></td>
+            <td>{e.host_os&&<OsBadge o={e.host_os}/>}</td>
+            <td className="cell-t">{e.user||'—'}</td>
+            <td className="cell-t">{e.row_count?.toLocaleString()}</td>
+            <td className="cell-t">{e.ingested_at}</td>
+          </tr>)}
+        </tbody></table>)}
+      </div>
+    </div>
+  </div>);
+}
+
+// === INGEST TAB ===
+function IngestView(){
+  const[path,setPath]=useState('');
+  const[loading,setLoading]=useState(false);
+  const[result,setResult]=useState(null);
+
+  const go=async()=>{
+    if(!path.trim())return;setLoading(true);setResult(null);
+    try{setResult(await api.ingest(path.trim()))}catch(e){setResult({error:e.message})}
+    setLoading(false);
+  };
+
+  return(<div>
+    <div className="ing-panel">
+      <div className="card-h">Ingest Archive or Directory</div>
+      <p style={{color:'var(--txt-2)',fontSize:'.78rem',marginBottom:12}}>
+        Point to a <code>.7z</code> archive (password: <code>infected</code>), <code>.tar.gz</code>, <code>.zip</code>,
+        or a directory. Nested archives will be extracted recursively. Browser DBs are detected by schema probing.
+      </p>
+      <div className="ing-row">
+        <input className="ing-in" placeholder="/path/to/evidence.7z or /path/to/extracted/" value={path} onChange={e=>setPath(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+        <button className="ing-btn" onClick={go} disabled={loading}>{loading?<><Spin/>Working...</>:'Ingest'}</button>
+      </div>
+    </div>
+    {result&&<div className="card">
+      <div className="card-h">{result.error?'Error':`Found ${result.databases_found} database(s)`}</div>
+      {result.error?<p style={{color:'var(--red)'}}>{result.error}</p>:(
+      <table className="tbl"><thead><tr><th>Path</th><th>Browser</th><th>OS</th><th>User</th><th>Profile</th><th>Rows</th><th>Status</th></tr></thead><tbody>
+        {(result.ingested||[]).map((e,i)=><tr key={i}>
+          <td className="cell-u" style={{maxWidth:400}}>{e.path}</td>
+          <td><BrowserBadge b={e.browser}/></td>
+          <td>{e.host_os&&<OsBadge o={e.host_os}/>}</td>
+          <td className="cell-t">{e.user||'—'}</td>
+          <td className="cell-t">{e.profile||'—'}</td>
+          <td className="cell-t">{e.rows?.toLocaleString()}</td>
+          <td style={{color:e.status==='ingested'?'var(--local)':'var(--txt-2)'}}>{e.status}</td>
+        </tr>)}
+      </tbody></table>)}
+    </div>}
+  </div>);
+}
+
+// === APP ===
+function App(){
+  const[view,setView]=useState(TABS.SEARCH);
+  const[stats,setStats]=useState(null);
+
+  useEffect(()=>{api.stats().then(setStats).catch(()=>{})},[]);
+
+  return(<div className="shell">
+    <header className="hdr">
+      <div className="hdr-logo">forensic<span>/</span>history</div>
+      <div className="hdr-meta">{stats?`${stats.total_visits?.toLocaleString()||0} visits indexed`:''}</div>
+    </header>
+    <div className="tabs">
+      {TAB_LABELS.map(([v,l])=><button key={v} className={`tab ${view===v?'on':''}`} onClick={()=>setView(v)}>{l}</button>)}
+    </div>
+    {view===TABS.SEARCH&&<SearchView/>}
+    {view===TABS.TIMELINE&&<TimelineView/>}
+    {view===TABS.FREQ&&<FreqView/>}
+    {view===TABS.INTRSTG&&<InterestingView/>}
+    {view===TABS.SOURCES&&<SourcesView/>}
+    {view===TABS.INGEST&&<IngestView/>}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
