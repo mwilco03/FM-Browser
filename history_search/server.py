@@ -20,14 +20,17 @@ import json
 import logging
 import os
 import pkgutil
+import secrets
 import shutil
 import sqlite3
 import tempfile
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, g, jsonify, request, send_file, send_from_directory
 
+from .pipeline.carve import carve_deleted_records
 from .pipeline.classify import classify_batch
 from .pipeline.constants import DEFAULT_SEARCH_LIMIT, INTERVAL_STRFTIME, MAX_SEARCH_LIMIT
 from .pipeline.extract import discover_files, extract_recursive
@@ -40,6 +43,40 @@ from .pipeline.ingest import discover_databases, ingest_database
 LOG = logging.getLogger("history_search")
 
 app = Flask(__name__, static_folder="static")
+
+# ---------------------------------------------------------------------------
+# Security: API token for mutating endpoints, browse path restriction
+# ---------------------------------------------------------------------------
+
+# Generated once at startup; printed to console for the responder to use.
+# Read-only endpoints (search, visit, aggregate, filters, heatmap) are open.
+API_TOKEN: Optional[str] = None  # Set in main()
+
+# Restrict /api/browse to these root paths (set via --browse-root)
+BROWSE_ROOTS: List[Path] = []  # Empty = unrestricted (legacy default)
+
+
+def require_token(fn):
+    """Decorator: reject mutating requests without a valid API token."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if API_TOKEN is None:
+            return fn(*args, **kwargs)  # auth disabled (e.g. testing)
+        token = request.headers.get("X-API-Token") or request.args.get("token")
+        if token != API_TOKEN:
+            return jsonify({"error": "unauthorized — supply X-API-Token header"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def _is_within_browse_roots(target: Path) -> bool:
+    """Check if target is within any allowed browse root."""
+    if not BROWSE_ROOTS:
+        return True  # unrestricted
+    resolved = target.resolve()
+    return any(resolved == root or str(resolved).startswith(str(root) + os.sep)
+               for root in BROWSE_ROOTS)
+
 
 # ---------------------------------------------------------------------------
 # Full pipeline orchestration
@@ -114,6 +151,33 @@ def run_pipeline(index_db: str, source_path: Path,
                 "os_platform": meta.os_platform, "user": meta.os_username,
                 "profile": meta.browser_profile, "rows": count, "status": "ingested"
             })
+
+            # Stage 5: Carve deleted records from WAL/freelist/slack
+            if engine not in ("teams_json",):
+                if on_progress:
+                    on_progress(f"Carving deleted records: {db_path.name}...")
+                active_urls = {r.full_url for r in records}
+                carved = carve_deleted_records(db_path, meta, provenance, active_urls)
+                if carved:
+                    carved = classify_batch(carved)
+                    # Ensure carved records keep their recovery tag
+                    for cr in carved:
+                        if "recovered_deleted" not in cr.tags:
+                            cr.tags.append("recovered_deleted")
+                            cr.tags = sorted(set(cr.tags))
+                    carved_count = insert_visits(
+                        index_db, carved, source_db=src_key + " [carved]",
+                        meta_browser=meta.browser, meta_platform=meta.os_platform,
+                        meta_username=meta.os_username, meta_profile=meta.browser_profile,
+                        meta_endpoint=meta.endpoint_name,
+                    )
+                    stats["total_new_rows"] += carved_count
+                    stats["ingested"].append({
+                        "path": src_key + " [carved]", "browser": meta.browser,
+                        "os_platform": meta.os_platform, "user": meta.os_username,
+                        "profile": meta.browser_profile, "rows": carved_count,
+                        "status": "carved"
+                    })
 
     finally:
         if tmp_dir:
@@ -217,11 +281,28 @@ def api_search():
     limit = min(int(request.args.get("limit", DEFAULT_SEARCH_LIMIT)), MAX_SEARCH_LIMIT)
     offset = int(request.args.get("offset", 0))
     sort = request.args.get("sort", "rank" if q else "time")
+    sort_dir = request.args.get("sort_dir", "desc").upper()
+    if sort_dir not in ("ASC", "DESC"):
+        sort_dir = "DESC"
     f = _get_filters()
+
+    # Build ORDER BY clause
+    SORT_MAP = {
+        "time": f"v.visit_time_utc {sort_dir}",
+        "host": f"v.dns_host {sort_dir}",
+        "title": f"v.title {sort_dir}",
+        "browser": f"v.browser {sort_dir}",
+        "url": f"v.full_url {sort_dir}",
+        "url_length": f"LENGTH(v.full_url) {sort_dir}",
+        "source": f"v.visit_source {sort_dir}",
+        "transition": f"v.transition_type {sort_dir}",
+        "duration": f"v.visit_duration_ms {sort_dir}",
+        "file_source": f"v.source_db_path {sort_dir}",
+    }
 
     if q:
         w, p = _build_where(f, fts_q=q)
-        order = "rank" if sort == "rank" else "v.visit_time_utc DESC"
+        order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
                f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
                f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
@@ -229,19 +310,24 @@ def api_search():
                 f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid WHERE {w}")
     else:
         w, p = _build_where(f)
+        order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
-               f"WHERE {w} ORDER BY v.visit_time_utc DESC LIMIT ? OFFSET ?")
+               f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
         csql = f"SELECT COUNT(*) FROM {TABLE_VISITS} v WHERE {w}"
 
     total = db.execute(csql, p).fetchone()[0]
     rows = []
     for r in db.execute(sql, p + [limit, offset]).fetchall():
         row = {k: r[k] for k in r.keys()}
-        # Parse tags JSON for frontend
+        # Parse tags and unfurl JSON for frontend
         try:
             row["tags"] = json.loads(row.get("tags", "[]"))
         except (json.JSONDecodeError, TypeError):
             row["tags"] = []
+        try:
+            row["unfurl"] = json.loads(row.get("unfurl", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            row["unfurl"] = []
         rows.append(row)
 
     return jsonify({"total": total, "limit": limit, "offset": offset, "results": rows})
@@ -259,6 +345,10 @@ def api_visit(visit_id: int):
         result["tags"] = json.loads(result.get("tags", "[]"))
     except (json.JSONDecodeError, TypeError):
         result["tags"] = []
+    try:
+        result["unfurl"] = json.loads(result.get("unfurl", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        result["unfurl"] = []
     return jsonify(result)
 
 
@@ -374,11 +464,67 @@ def api_heatmap():
     return jsonify({"cells": [dict(r) for r in rows]})
 
 
+@app.route("/api/browse")
+def api_browse():
+    """Browse server filesystem for file picker."""
+    target = request.args.get("path", "/")
+    target = Path(target).resolve()
+    if not _is_within_browse_roots(target):
+        return jsonify({"error": "path outside allowed roots", "path": str(target),
+                        "allowed_roots": [str(r) for r in BROWSE_ROOTS]}), 403
+    if not target.exists():
+        return jsonify({"error": "path not found", "path": str(target)}), 404
+    if not target.is_dir():
+        # If it's a file, return parent listing with this file highlighted
+        target = target.parent
+
+    entries = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            try:
+                stat = entry.stat()
+                entries.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "is_dir": entry.is_dir(),
+                    "size": stat.st_size if not entry.is_dir() else None,
+                    "ingestable": (
+                        entry.is_dir()
+                        or entry.suffix.lower() in (".7z", ".zip", ".tar", ".gz", ".tgz")
+                        or entry.name.endswith(".tar.gz")
+                    ),
+                })
+            except (PermissionError, OSError):
+                continue
+    except PermissionError:
+        return jsonify({"error": "permission denied", "path": str(target)}), 403
+
+    return jsonify({
+        "path": str(target),
+        "parent": str(target.parent) if target != target.parent else None,
+        "entries": entries,
+    })
+
+
+@app.route("/api/clear", methods=["POST"])
+@require_token
+def api_clear():
+    """Wipe all visit data and ingest log, keeping schema intact."""
+    db = _get_db()
+    db.execute(f"DELETE FROM {TABLE_VISITS}")
+    db.execute("DELETE FROM ingest_log")
+    db.commit()
+    rebuild_fts(g.db_path)
+    return jsonify({"status": "ok", "message": "All data cleared"})
+
+
 @app.route("/api/ingest", methods=["POST"])
+@require_token
 def api_ingest():
     """Accept archive/directory path and run the full pipeline."""
     body = request.get_json(silent=True) or {}
     path_str = body.get("path", "")
+    clear_first = body.get("clear", False)
     if not path_str:
         return jsonify({"error": "path required"}), 400
 
@@ -386,11 +532,19 @@ def api_ingest():
     if not target.exists():
         return jsonify({"error": f"not found: {target}"}), 400
 
+    if clear_first:
+        db = _get_db()
+        db.execute(f"DELETE FROM {TABLE_VISITS}")
+        db.execute("DELETE FROM ingest_log")
+        db.commit()
+        rebuild_fts(g.db_path)
+
     stats = run_pipeline(g.db_path, target)
     return jsonify(stats)
 
 
 @app.route("/api/reingest", methods=["POST"])
+@require_token
 def api_reingest():
     """Re-run classification (Stage 3) and rebuild FTS index."""
     db = _get_db()
@@ -405,9 +559,9 @@ def api_reingest():
         record = classify_visit(record)
         db.execute(
             f"UPDATE {TABLE_VISITS} SET dns_host=?, url_path=?, query_string_decoded=?, "
-            f"tags=? WHERE id=?",
+            f"tags=?, unfurl=? WHERE id=?",
             (record.dns_host, record.url_path, record.query_string_decoded,
-             json.dumps(record.tags), row["id"])
+             json.dumps(record.tags), json.dumps(record.unfurl), row["id"])
         )
         count += 1
 
@@ -417,6 +571,7 @@ def api_reingest():
 
 
 @app.route("/api/rebuild-fts", methods=["POST"])
+@require_token
 def api_rebuild_fts():
     """Rebuild the FTS5 index."""
     rebuild_fts(g.db_path)
@@ -434,12 +589,39 @@ def main():
     p.add_argument("--db", default="history_index.db")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--no-auth", action="store_true",
+                   help="Disable API token requirement (NOT recommended)")
+    p.add_argument("--browse-root", action="append", default=[],
+                   help="Restrict /api/browse to these directories (repeatable)")
     args = p.parse_args()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s | %(name)s | %(message)s"
     )
+
+    # Security setup
+    global API_TOKEN, BROWSE_ROOTS
+    if not args.no_auth:
+        API_TOKEN = secrets.token_urlsafe(32)
+        LOG.info("=" * 60)
+        LOG.info("API Token (required for POST endpoints):")
+        LOG.info("  %s", API_TOKEN)
+        LOG.info("Pass via X-API-Token header or ?token= query param")
+        LOG.info("=" * 60)
+    else:
+        API_TOKEN = None
+        LOG.warning("Auth disabled (--no-auth). Mutating endpoints are UNPROTECTED.")
+
+    if args.browse_root:
+        BROWSE_ROOTS = [Path(r).resolve() for r in args.browse_root]
+        LOG.info("Browse restricted to: %s", [str(r) for r in BROWSE_ROOTS])
+    else:
+        LOG.warning("No --browse-root set. /api/browse can access entire filesystem.")
+
+    if args.host != "127.0.0.1":
+        LOG.warning("Binding to %s — server exposed on network!", args.host)
+
     db_path = os.path.abspath(args.db)
 
     # Initialize schema

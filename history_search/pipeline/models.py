@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -63,3 +63,9 @@ class VisitRecord:
 
     # Classification (populated in Stage 3)
     tags: List[str] = field(default_factory=list)
+
+    # URL unfurling (populated in Stage 3)
+    unfurl: List[Dict] = field(default_factory=list)
+    # Each entry: {"type": str, "key": str, "value": str}
+    # Types: "search_terms", "embedded_url", "embedded_timestamp",
+    #        "protobuf", "geo_coords", "fragment", "encoded_param"

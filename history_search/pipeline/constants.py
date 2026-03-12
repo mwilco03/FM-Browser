@@ -75,6 +75,21 @@ WINDOWS_BROWSER_PATHS = [
     (re.compile(r"Users/([^/]+)/AppData/Local/Microsoft/Edge/User Data/([^/]+)/History", re.I), "edge"),
     (re.compile(r"Users/([^/]+)/AppData/Local/BraveSoftware/Brave-Browser/User Data/([^/]+)/History", re.I), "brave"),
     (re.compile(r"Users/([^/]+)/AppData/Local/Vivaldi/User Data/([^/]+)/History", re.I), "vivaldi"),
+    # Microsoft Teams (old Electron desktop app - Chromium-based)
+    (re.compile(r"Users/([^/]+)/AppData/Roaming/Microsoft/Teams/([^/]+)/History", re.I), "teams"),
+    (re.compile(r"Users/([^/]+)/AppData/Local/Packages/MSTeams_[^/]+/LocalCache/Microsoft/MSTeams/([^/]+)/History", re.I), "teams"),
+]
+
+# Microsoft Teams IndexedDB / LevelDB paths (for JSON-based extraction)
+TEAMS_LEVELDB_PATHS = [
+    re.compile(r"Microsoft/Teams/(Local Storage|IndexedDB)/", re.I),
+    re.compile(r"MSTeams.*?/(Local Storage|IndexedDB)/", re.I),
+]
+
+# Microsoft Teams JSON log paths
+TEAMS_LOG_PATHS = [
+    re.compile(r"Microsoft/Teams/.*?\.json$", re.I),
+    re.compile(r"MSTeams.*?\.json$", re.I),
 ]
 
 # OS detection patterns

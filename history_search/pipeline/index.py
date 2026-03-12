@@ -13,7 +13,7 @@ LOG = logging.getLogger("history_search.index")
 TABLE_VISITS = "visits"
 TABLE_FTS = "visits_fts"
 
-FTS_COLUMNS = ("full_url", "title", "query_string_decoded", "dns_host", "tags", "from_visit_url")
+FTS_COLUMNS = ("full_url", "title", "query_string_decoded", "dns_host", "tags", "from_visit_url", "unfurl")
 
 SCHEMA_DDL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_VISITS} (
@@ -48,7 +48,10 @@ CREATE TABLE IF NOT EXISTS {TABLE_VISITS} (
     visit_duration_ms       INTEGER NOT NULL DEFAULT 0,
 
     -- Classification
-    tags                    TEXT NOT NULL DEFAULT '[]'
+    tags                    TEXT NOT NULL DEFAULT '[]',
+
+    -- URL unfurling (JSON array of extracted artifacts)
+    unfurl                  TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_visits_host       ON {TABLE_VISITS}(dns_host);
@@ -106,8 +109,8 @@ INSERT INTO {TABLE_VISITS} (
     browser_profile, os_username, endpoint_name, visit_time_utc, full_url,
     title, dns_host, url_path, query_string_decoded, visit_source,
     visit_source_confidence, transition_type, transition_qualifiers,
-    from_visit_url, visit_duration_ms, tags
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    from_visit_url, visit_duration_ms, tags, unfurl
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """
 
 
@@ -115,6 +118,12 @@ def init_schema(db_path: str) -> None:
     """Initialize the index database schema."""
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA_DDL)
+        # Migrate: add unfurl column if missing (for pre-existing databases)
+        try:
+            conn.execute(f"SELECT unfurl FROM {TABLE_VISITS} LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute(f"ALTER TABLE {TABLE_VISITS} ADD COLUMN unfurl TEXT NOT NULL DEFAULT '[]'")
+            LOG.info("Migrated: added unfurl column")
     LOG.info("Schema initialized: %s", db_path)
 
 
@@ -126,7 +135,7 @@ def _record_to_tuple(r: VisitRecord) -> tuple:
         r.visit_time_utc, r.full_url, r.title, r.dns_host, r.url_path,
         r.query_string_decoded, r.visit_source, r.visit_source_confidence,
         r.transition_type, r.transition_qualifiers, r.from_visit_url,
-        r.visit_duration_ms, json.dumps(r.tags),
+        r.visit_duration_ms, json.dumps(r.tags), json.dumps(r.unfurl),
     )
 
 

@@ -20,6 +20,7 @@ class Browser(Enum):
     ARC = "arc"
     OPERA = "opera"
     CHROMIUM = "chromium"
+    TEAMS = "teams"
     UNKNOWN = "unknown"
 
 
@@ -32,6 +33,7 @@ BROWSER_ENGINE_MAP = {
     Browser.ARC: BrowserEngine.CHROMIUM,
     Browser.OPERA: BrowserEngine.CHROMIUM,
     Browser.CHROMIUM: BrowserEngine.CHROMIUM,
+    Browser.TEAMS: BrowserEngine.CHROMIUM,
     Browser.FIREFOX: BrowserEngine.GECKO,
     Browser.SAFARI: BrowserEngine.WEBKIT,
 }
@@ -43,6 +45,7 @@ class VisitSource(Enum):
     SYNCED = "synced"
     EXTENSION = "extension"
     IMPORTED = "imported"
+    CARVED = "carved"
     UNKNOWN = "unknown"
 
 

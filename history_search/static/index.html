@@ -28,7 +28,7 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:var(--bg-1)}
 ::-webkit-scrollbar-thumb{background:var(--bg-3);border-radius:3px}
-.shell{max-width:1520px;margin:0 auto;padding:20px 28px}
+.shell{max-width:100%;margin:0 auto;padding:20px 28px}
 
 /* Header */
 .hdr{display:flex;align-items:center;gap:14px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border)}
@@ -59,6 +59,8 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .f-meta em{color:var(--amber);font-style:normal}
 .f-clear{font-family:var(--mono);font-size:.68rem;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r);background:0;color:var(--txt-2);cursor:pointer}
 .f-clear:hover{color:var(--red);border-color:var(--red)}
+.f-date{font-family:var(--mono);font-size:.73rem;padding:4px 8px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-1);outline:0;color-scheme:dark}
+.f-date:focus{border-color:var(--accent)}
 
 /* Badges */
 .badge{font-family:var(--mono);font-size:.68rem;padding:2px 7px;border-radius:3px;display:inline-block;font-weight:500;margin-right:2px}
@@ -67,6 +69,7 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .b-extension{background:var(--purple-dim);color:var(--purple)}
 .b-imported{background:var(--bg-3);color:var(--txt-1)}
 .b-unknown{background:var(--bg-3);color:var(--txt-2)}
+.b-carved{background:rgba(245,158,11,.15);color:#f59e0b;border:1px dashed #f59e0b}
 .b-likely{opacity:.65;border:1px dashed currentColor}
 .b-tag{background:var(--red-dim);color:var(--red);cursor:pointer}
 .b-tag:hover{background:var(--red);color:#fff}
@@ -74,20 +77,24 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .b-os{background:var(--purple-dim);color:var(--purple)}
 
 /* Table */
-.tbl{width:100%;border-collapse:collapse;font-size:.78rem}
-.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:1}
+.tbl-wrap{overflow-x:auto;overflow-y:visible;max-width:100%}
+.tbl{border-collapse:collapse;font-size:.78rem;min-width:100%;white-space:nowrap}
+.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:1;cursor:pointer;user-select:none}
+.tbl th:hover{color:var(--accent)}
+.tbl th .sort-arrow{margin-left:4px;font-size:.6rem}
 .tbl td{padding:7px 10px;border-bottom:1px solid rgba(42,45,64,.4);vertical-align:top;line-height:1.5}
 .tbl tr:hover td{background:var(--bg-1)}
 .cell-t{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);white-space:nowrap}
 .cell-h{font-family:var(--mono);font-size:.74rem;color:var(--amber);cursor:pointer}
 .cell-h:hover{text-decoration:underline}
-.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cell-tl{color:var(--txt-0);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cell-q{font-family:var(--mono);font-size:.68rem;color:var(--green);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);white-space:nowrap}
+.cell-tl{color:var(--txt-0);white-space:nowrap}
+.cell-q{font-family:var(--mono);font-size:.68rem;color:var(--green);white-space:nowrap}
 .cell-tr{font-family:var(--mono);font-size:.68rem;color:var(--txt-2)}
+.cell-src{font-family:var(--mono);font-size:.66rem;color:var(--blue);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Detail expand */
-.det td{background:var(--bg-1)!important;padding:12px 18px!important}
+.det td{background:var(--bg-1)!important;padding:12px 18px!important;white-space:normal!important}
 .det-grid{display:grid;grid-template-columns:140px 1fr;gap:3px 12px;font-size:.75rem}
 .det-k{font-family:var(--mono);color:var(--txt-2);text-align:right}
 .det-v{font-family:var(--mono);color:var(--txt-0);word-break:break-all}
@@ -133,14 +140,29 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 
 /* Ingest */
 .ing-panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;margin-bottom:14px}
-.ing-row{display:flex;gap:8px}
-.ing-in{flex:1;font-family:var(--mono);font-size:.82rem;padding:10px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-0);outline:0}
+.ing-row{display:flex;gap:8px;flex-wrap:wrap}
+.ing-in{flex:1;min-width:250px;font-family:var(--mono);font-size:.82rem;padding:10px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-0);outline:0}
 .ing-btn{font-family:var(--mono);font-size:.78rem;padding:10px 18px;border:none;border-radius:var(--r);background:var(--accent);color:#fff;cursor:pointer;font-weight:500}
 .ing-btn:disabled{opacity:.5}
 .ing-btn.sec{background:var(--bg-3);color:var(--txt-1);border:1px solid var(--border)}
 .ing-btn.sec:hover{border-color:var(--accent)}
+.ing-btn.danger{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+.ing-btn.danger:hover{background:var(--red);color:#fff}
 .ing-log{margin-top:12px;font-family:var(--mono);font-size:.72rem;color:var(--txt-1);max-height:120px;overflow-y:auto;background:var(--bg-0);padding:10px;border-radius:var(--r);border:1px solid var(--border)}
 .ing-log div{padding:2px 0}
+
+/* File picker */
+.fp-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:100;display:flex;align-items:center;justify-content:center}
+.fp-dialog{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;width:680px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column}
+.fp-path{font-family:var(--mono);font-size:.75rem;color:var(--accent);margin-bottom:10px;word-break:break-all}
+.fp-list{overflow-y:auto;flex:1;min-height:200px;max-height:50vh}
+.fp-item{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;border-radius:var(--r);font-family:var(--mono);font-size:.78rem}
+.fp-item:hover{background:var(--bg-3)}
+.fp-item.selected{background:var(--accent-dim);border:1px solid var(--accent)}
+.fp-icon{font-size:1rem;min-width:20px;text-align:center}
+.fp-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fp-size{color:var(--txt-2);font-size:.68rem;min-width:60px;text-align:right}
+.fp-actions{display:flex;gap:8px;margin-top:12px;justify-content:flex-end}
 
 /* Stats */
 .stat-row{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:18px}
@@ -162,8 +184,13 @@ const {useState,useEffect,useCallback,useRef,useMemo} = React;
 const PAGE = 50;
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',unknown:'b-unknown'};
-const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',unknown:'?'};
+const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',carved:'b-carved',unknown:'b-unknown'};
+const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',carved:'\u{1F52E}',unknown:'?'};
+
+// API token stored in sessionStorage; set via Security panel in Ingest tab
+function getToken(){return sessionStorage.getItem('api_token')||''}
+function setToken(t){sessionStorage.setItem('api_token',t)}
+function authHeaders(extra={}){const t=getToken();const h={...extra};if(t)h['X-API-Token']=t;return h}
 
 const api = {
   search: p => fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
@@ -171,12 +198,16 @@ const api = {
   aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(r=>r.json()),
   filters: () => fetch('/api/filters').then(r=>r.json()),
   heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
-  ingest: path => fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})}).then(r=>r.json()),
-  reingest: () => fetch('/api/reingest',{method:'POST'}).then(r=>r.json()),
-  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(r=>r.json()),
+  ingest: (path, clear) => fetch('/api/ingest',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({path, clear: !!clear})}).then(r=>r.json()),
+  reingest: () => fetch('/api/reingest',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  clear: () => fetch('/api/clear',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(r=>r.json()),
 };
 
 function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
+
+function fmtSize(b){if(b==null)return '';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'K';if(b<1073741824)return(b/1048576).toFixed(1)+'M';return(b/1073741824).toFixed(1)+'G'}
 
 // Shared components
 function Spin(){return <span className="spinner"/>}
@@ -247,6 +278,78 @@ function Heatmap({cells}){
 }
 
 // ============================================================
+// FILE PICKER DIALOG
+// ============================================================
+function FilePicker({onSelect,onClose}){
+  const[path,setPath]=useState('/');
+  const[entries,setEntries]=useState([]);
+  const[parent,setParent]=useState(null);
+  const[selected,setSelected]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[error,setError]=useState('');
+
+  const browse=useCallback(async(p)=>{
+    setLoading(true);setError('');
+    try{
+      const r=await api.browse(p);
+      if(r.error){setError(r.error);setLoading(false);return}
+      setPath(r.path);setEntries(r.entries||[]);setParent(r.parent);setSelected(null);
+    }catch(e){setError(e.message)}
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{browse('/')},[browse]);
+
+  const handleSelect=(entry)=>{
+    if(entry.is_dir){browse(entry.path)}
+    else{setSelected(entry.path)}
+  };
+
+  return(<div className="fp-overlay" onClick={onClose}>
+    <div className="fp-dialog" onClick={e=>e.stopPropagation()}>
+      <div className="card-h">Browse Server Files</div>
+      <div className="fp-path">{path}</div>
+      {error&&<div style={{color:'var(--red)',fontSize:'.78rem',marginBottom:8}}>{error}</div>}
+      {loading?<div style={{padding:20}}><Spin/> Loading...</div>:(
+        <div className="fp-list">
+          {parent&&<div className="fp-item" onClick={()=>browse(parent)}>
+            <span className="fp-icon">..</span><span className="fp-name">(parent directory)</span>
+          </div>}
+          {entries.map(e=>(
+            <div key={e.path} className={`fp-item ${selected===e.path?'selected':''}`}
+              onClick={()=>handleSelect(e)} onDoubleClick={()=>{if(e.is_dir)browse(e.path);else{onSelect(e.path);onClose()}}}>
+              <span className="fp-icon">{e.is_dir?'\u{1F4C1}':e.ingestable?'\u{1F4E6}':'\u{1F4C4}'}</span>
+              <span className="fp-name">{e.name}</span>
+              <span className="fp-size">{fmtSize(e.size)}</span>
+            </div>
+          ))}
+          {entries.length===0&&!parent&&<div style={{padding:20,color:'var(--txt-2)'}}>Empty directory</div>}
+        </div>
+      )}
+      <div className="fp-actions">
+        {selected&&<span style={{fontFamily:'var(--mono)',fontSize:'.72rem',color:'var(--txt-1)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{selected}</span>}
+        <button className="ing-btn sec" onClick={()=>{if(path){onSelect(path);onClose()}}}>Select This Folder</button>
+        {selected&&<button className="ing-btn" onClick={()=>{onSelect(selected);onClose()}}>Select File</button>}
+        <button className="ing-btn sec" onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  </div>);
+}
+
+// ============================================================
+// SORTABLE TABLE HEADER
+// ============================================================
+function SortHeader({label,sortKey,currentSort,currentDir,onSort}){
+  const active = currentSort === sortKey;
+  const arrow = active ? (currentDir==='asc' ? '\u25B2' : '\u25BC') : '';
+  return(
+    <th onClick={()=>onSort(sortKey)} title={`Sort by ${label}`}>
+      {label}<span className="sort-arrow">{arrow}</span>
+    </th>
+  );
+}
+
+// ============================================================
 // SEARCH VIEW
 // ============================================================
 function SearchView({initialFilters,onDrillHost,onDrillTag}){
@@ -257,11 +360,15 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const[osPlatform,setOsPlatform]=useState(initialFilters?.os_platform||'');
   const[tag,setTag]=useState(initialFilters?.tag||'');
   const[transType,setTransType]=useState(initialFilters?.transition_type||'');
+  const[startDate,setStartDate]=useState(initialFilters?.start||'');
+  const[endDate,setEndDate]=useState(initialFilters?.end||'');
   const[results,setResults]=useState(null);
   const[loading,setLoading]=useState(false);
   const[offset,setOffset]=useState(0);
   const[expanded,setExpanded]=useState(null);
   const[filterOpts,setFilterOpts]=useState(null);
+  const[sortCol,setSortCol]=useState('time');
+  const[sortDir,setSortDir]=useState('desc');
   const dq=useDebounce(q,300);
 
   // Lazy-load filter options on first interaction
@@ -279,21 +386,32 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
 
   const doSearch=useCallback(async(query,off)=>{
     setLoading(true);
-    const p={limit:PAGE,offset:off};
+    const p={limit:PAGE,offset:off,sort:sortCol,sort_dir:sortDir};
     if(query)p.q=query;
     if(host)p.host=host;if(browser)p.browser=browser;
     if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
     if(tag)p.tag=tag;if(transType)p.transition_type=transType;
+    if(startDate)p.start=startDate+'T00:00:00Z';
+    if(endDate)p.end=endDate+'T23:59:59Z';
     try{setResults(await api.search(p))}catch(e){console.error(e)}
     setLoading(false);
-  },[host,browser,visitSource,osPlatform,tag,transType]);
+  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir]);
 
   useEffect(()=>{setOffset(0);doSearch(dq,0)},[dq,doSearch]);
   useEffect(()=>{doSearch(dq,offset)},[offset]);
 
-  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setOffset(0)};
-  const hasFilters=host||browser||visitSource||osPlatform||tag||transType;
+  const handleSort=(key)=>{
+    if(sortCol===key){setSortDir(sortDir==='desc'?'asc':'desc')}
+    else{setSortCol(key);setSortDir('desc')}
+    setOffset(0);
+  };
+
+  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setStartDate('');setEndDate('');setOffset(0)};
+  const hasFilters=host||browser||visitSource||osPlatform||tag||transType||startDate||endDate;
   const total=results?.total||0, rows=results?.results||[];
+
+  // Column definitions for sortable headers
+  const COL_NUM = 10;
 
   return(<div>
     <div className="search-wrap">
@@ -305,7 +423,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
       <input className="f-in" placeholder="host..." value={host} onChange={e=>{setHost(e.target.value);setOffset(0)}} onFocus={loadFilters} style={{width:150}}/>
       <select className="f-sel" value={browser} onChange={e=>{setBrowser(e.target.value);setOffset(0)}} onFocus={loadFilters}>
         <option value="">All browsers</option>
-        {(filterOpts?.browser||['chrome','safari','firefox','edge','brave']).map(b=><option key={b} value={b}>{b}</option>)}
+        {(filterOpts?.browser||['chrome','safari','firefox','edge','brave','teams']).map(b=><option key={b} value={b}>{b}</option>)}
       </select>
       <select className="f-sel" value={visitSource} onChange={e=>{setVisitSource(e.target.value);setOffset(0)}} onFocus={loadFilters}>
         <option value="">All sources</option>
@@ -320,14 +438,32 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
         {(filterOpts?.transition_type||['typed','link','bookmark','reload','form_submit','redirect_permanent','redirect_temporary']).map(t=><option key={t} value={t}>{t}</option>)}
       </select>
       {tag&&<span className="badge b-tag" style={{cursor:'pointer'}} onClick={()=>{setTag('');setOffset(0)}}>{tag} x</span>}
+    </div>
+    <div className="filters">
+      <label style={{fontFamily:'var(--mono)',fontSize:'.68rem',color:'var(--txt-2)'}}>From:</label>
+      <input type="date" className="f-date" value={startDate} onChange={e=>{setStartDate(e.target.value);setOffset(0)}} onFocus={loadFilters}/>
+      <label style={{fontFamily:'var(--mono)',fontSize:'.68rem',color:'var(--txt-2)'}}>To:</label>
+      <input type="date" className="f-date" value={endDate} onChange={e=>{setEndDate(e.target.value);setOffset(0)}} onFocus={loadFilters}/>
+      {filterOpts?.time_range?.earliest&&<span style={{fontFamily:'var(--mono)',fontSize:'.65rem',color:'var(--txt-2)',marginLeft:4}}>
+        Data range: {filterOpts.time_range.earliest.split('T')[0]} to {filterOpts.time_range.latest.split('T')[0]}
+      </span>}
       {hasFilters&&<button className="f-clear" onClick={clearFilters}>Clear all</button>}
       {loading&&<Spin/>}
       <span className="f-meta"><em>{total.toLocaleString()}</em> results</span>
     </div>
 
     {rows.length===0&&!loading?<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>:(
-    <div style={{overflowX:'auto'}}><table className="tbl"><thead><tr>
-      <th>Time</th><th>Source</th><th>Host</th><th>Title</th><th>URL</th><th>Tags</th><th>Browser</th><th>Transition</th>
+    <div className="tbl-wrap"><table className="tbl"><thead><tr>
+      <SortHeader label="Time" sortKey="time" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="Source" sortKey="source" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="Host" sortKey="host" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="Title" sortKey="title" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="URL" sortKey="url" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="URL Len" sortKey="url_length" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <th>Tags</th>
+      <SortHeader label="Browser" sortKey="browser" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="Transition" sortKey="transition" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
+      <SortHeader label="File Source" sortKey="file_source" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
     </tr></thead><tbody>
       {rows.map(r=><React.Fragment key={r.id}>
         <tr onClick={()=>setExpanded(expanded===r.id?null:r.id)} style={{cursor:'pointer'}}>
@@ -336,17 +472,28 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <td><span className="cell-h" onClick={e=>{e.stopPropagation();setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</span></td>
           <td className="cell-tl" title={r.title}>{r.title}</td>
           <td className="cell-u" title={r.full_url}>{r.full_url}</td>
-          <td>{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
+          <td className="cell-t" style={{textAlign:'right'}}>{r.full_url?.length}</td>
+          <td>{(r.unfurl||[]).length>0&&<span className="badge" style={{background:'var(--amber-dim)',color:'var(--amber)',cursor:'pointer',fontSize:'.6rem'}} title="Has unfurled data - click row to see">{(r.unfurl||[]).length}</span>}{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
           <td><BrowserBadge b={r.browser}/></td>
           <td className="cell-tr">{r.transition_type}{r.transition_qualifiers?` (${r.transition_qualifiers})`:''}</td>
+          <td className="cell-src" title={r.provenance_chain||r.source_db_path}>{r.source_db_path||r.provenance_chain||'-'}</td>
         </tr>
-        {expanded===r.id&&<tr className="det"><td colSpan={8}><div className="det-grid">
-          <span className="det-k">URL</span><span className="det-v">{r.full_url}</span>
+        {expanded===r.id&&<tr className="det"><td colSpan={COL_NUM}><div className="det-grid">
+          <span className="det-k">Full URL</span><span className="det-v">{r.full_url}</span>
+          <span className="det-k">URL Length</span><span className="det-v">{r.full_url?.length} chars</span>
           <span className="det-k">Title</span><span className="det-v">{r.title}</span>
           <span className="det-k">Host</span><span className="det-v">{r.dns_host}</span>
           <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
-          <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded}</span>
-          <span className="det-k">Time</span><span className="det-v">{r.visit_time_utc}</span>
+          <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded||'-'}</span>
+          {r.query_string_decoded&&r.query_string_decoded.includes('=')&&<>
+            <span className="det-k" style={{color:'var(--green)',opacity:.7}}>Parsed Params</span>
+            <span className="det-v">{r.query_string_decoded.split('&').map((pair,i)=>{
+              const [k,...rest]=pair.split('=');
+              const v=rest.join('=');
+              return <div key={i} style={{marginBottom:2}}><span style={{color:'var(--txt-2)'}}>{k}</span><span style={{color:'var(--txt-2)'}}> = </span><span style={{color:'var(--green)'}}>{v}</span></div>
+            })}</span>
+          </>}
+          <span className="det-k">Time (UTC)</span><span className="det-v">{r.visit_time_utc}</span>
           <span className="det-k">Visit Source</span><span className="det-v"><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></span>
           <span className="det-k">Transition</span><span className="det-v">{r.transition_type} {r.transition_qualifiers&&`[${r.transition_qualifiers}]`}</span>
           <span className="det-k">Duration</span><span className="det-v">{r.visit_duration_ms>0?`${(r.visit_duration_ms/1000).toFixed(1)}s`:'-'}</span>
@@ -356,8 +503,29 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <span className="det-k">Platform</span><span className="det-v">{r.os_platform}</span>
           <span className="det-k">Engine</span><span className="det-v">{r.browser_engine}</span>
           <span className="det-k">Endpoint</span><span className="det-v">{r.endpoint_name||'-'}</span>
+          <span className="det-k">File Source</span><span className="det-v" style={{color:'var(--blue)'}}>{r.source_db_path||'-'}</span>
           <span className="det-k">Provenance</span><span className="det-v" style={{fontSize:'.68rem'}}>{r.provenance_chain}</span>
           {(r.tags||[]).length>0&&<><span className="det-k">Tags</span><span className="det-v">{r.tags.map(t=><TagPill key={t} tag={t} onClick={()=>{setTag(t);setOffset(0)}}/>)}</span></>}
+          {(r.unfurl||[]).length>0&&<>
+            <span className="det-k" style={{color:'var(--amber)',gridColumn:'1/-1',textAlign:'left',marginTop:8,borderTop:'1px solid var(--border)',paddingTop:8}}>URL UNFURL</span>
+            <span className="det-v" style={{display:'none'}}/>
+            {r.unfurl.map((u,i)=><React.Fragment key={i}>
+              <span className="det-k" style={{color:
+                u.type==='search_terms'?'var(--green)':
+                u.type==='embedded_url'?'var(--accent)':
+                u.type==='embedded_timestamp'?'var(--amber)':
+                u.type==='geo_coords'||u.type==='geo_place'?'var(--purple)':
+                u.type==='protobuf'?'var(--blue)':
+                'var(--txt-2)'
+              }}>{u.type}: {u.key}</span>
+              <span className="det-v" style={{color:
+                u.type==='search_terms'?'var(--green)':
+                u.type==='embedded_timestamp'?'var(--amber)':
+                u.type==='geo_coords'||u.type==='geo_place'?'var(--purple)':
+                'var(--txt-0)'
+              }}>{u.value}</span>
+            </React.Fragment>)}
+          </>}
         </div></td></tr>}
       </React.Fragment>)}
     </tbody></table></div>)}
@@ -424,7 +592,6 @@ function ExploreView({onDrillToSearch}){
   const drillToSearch=(label)=>{
     if(!dim)return;
     const f={};
-    // Map dimension key to filter parameter
     if(dim.key==='dns_host')f.host=label;
     else if(dim.key==='tags')f.tag=label;
     else f[dim.key]=label;
@@ -466,7 +633,6 @@ function ExploreView({onDrillToSearch}){
 
     {loading&&<div style={{padding:20}}><Spin/> Loading...</div>}
 
-    {/* Dimension chart */}
     {dim&&data.length>0&&!loading&&(
       <div className="card" style={{marginBottom:14}}>
         <div className="card-h">{dim.label} (top {Math.min(data.length,30)})</div>
@@ -475,7 +641,6 @@ function ExploreView({onDrillToSearch}){
       </div>
     )}
 
-    {/* Timeline chart */}
     {timeDim&&timeData.length>0&&!loading&&(
       <div className="card" style={{marginBottom:14}}>
         <div className="card-h">Timeline ({timeDim.label})</div>
@@ -483,7 +648,6 @@ function ExploreView({onDrillToSearch}){
       </div>
     )}
 
-    {/* Heatmap */}
     {hmData.length>0&&(
       <div className="card" style={{marginBottom:14}}>
         <div className="card-h">Activity Heatmap (day of week x hour of day)</div>
@@ -506,14 +670,19 @@ function IngestView(){
   const[result,setResult]=useState(null);
   const[log,setLog]=useState([]);
   const[filterInfo,setFilterInfo]=useState(null);
+  const[showPicker,setShowPicker]=useState(false);
+  const[clearFirst,setClearFirst]=useState(false);
+  const[token,setTokenLocal]=useState(getToken());
+  const handleTokenChange=(e)=>{setTokenLocal(e.target.value);setToken(e.target.value)};
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
 
   const go=async()=>{
     if(!path.trim())return;
     setLoading(true);setResult(null);setLog([{msg:'Starting pipeline...'}]);
+    if(clearFirst){setLog(prev=>[...prev,{msg:'Clearing existing data first...'}])}
     try{
-      const r = await api.ingest(path.trim());
+      const r = await api.ingest(path.trim(), clearFirst);
       setResult(r);
       setLog(prev=>[...prev,{msg:`Done: ${r.databases_found} DBs, ${r.total_new_rows||0} new rows`}]);
       api.filters().then(setFilterInfo);
@@ -521,6 +690,17 @@ function IngestView(){
       setResult({error:e.message});
       setLog(prev=>[...prev,{msg:`Error: ${e.message}`}]);
     }
+    setLoading(false);
+  };
+
+  const clearAll=async()=>{
+    if(!confirm('Clear ALL indexed data? This cannot be undone.'))return;
+    setLoading(true);setLog([{msg:'Clearing all data...'}]);
+    try{
+      await api.clear();
+      setLog(prev=>[...prev,{msg:'All data cleared'}]);
+      api.filters().then(setFilterInfo);
+    }catch(e){setLog(prev=>[...prev,{msg:`Error: ${e.message}`}])}
     setLoading(false);
   };
 
@@ -534,23 +714,43 @@ function IngestView(){
   };
 
   return(<div>
+    {showPicker&&<FilePicker onSelect={(p)=>{setPath(p);setShowPicker(false)}} onClose={()=>setShowPicker(false)}/>}
+
+    <div className="ing-panel" style={{marginBottom:14}}>
+      <div className="card-h">API Token</div>
+      <p style={{color:'var(--txt-2)',fontSize:'.72rem',marginBottom:6}}>
+        Paste the API token printed at server startup. Required for ingest, clear, and reclassify operations.
+      </p>
+      <input className="ing-in" type="password" placeholder="Paste API token from server console" value={token} onChange={handleTokenChange}
+             style={{maxWidth:420,fontFamily:'var(--mono)',fontSize:'.72rem'}}/>
+    </div>
+
     <div className="ing-panel">
       <div className="card-h">Ingest Archive or Directory</div>
       <p style={{color:'var(--txt-2)',fontSize:'.78rem',marginBottom:12}}>
         Point to a <code>.7z</code> archive (passwords: infected/dangerous), <code>.tar.gz</code>, <code>.zip</code>,
         or a directory. Nested archives are extracted recursively. Browser DBs detected by schema probing.
+        Microsoft Teams JSON logs also supported.
       </p>
       <div className="ing-row">
         <input className="ing-in" placeholder="/path/to/evidence.7z or /path/to/extracted/" value={path} onChange={e=>setPath(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+        <button className="ing-btn sec" onClick={()=>setShowPicker(true)} disabled={loading}>Browse...</button>
         <button className="ing-btn" onClick={go} disabled={loading}>{loading?<><Spin/>Working...</>:'Ingest'}</button>
-        <button className="ing-btn sec" onClick={reclassify} disabled={loading}>Re-classify</button>
+      </div>
+      <div style={{display:'flex',gap:12,alignItems:'center',marginTop:10}}>
+        <label style={{fontFamily:'var(--mono)',fontSize:'.72rem',color:'var(--txt-2)',display:'flex',alignItems:'center',gap:5,cursor:'pointer'}}>
+          <input type="checkbox" checked={clearFirst} onChange={e=>setClearFirst(e.target.checked)} style={{accentColor:'var(--red)'}}/>
+          Clear existing data before ingest
+        </label>
+        <button className="ing-btn sec" onClick={reclassify} disabled={loading} style={{fontSize:'.72rem',padding:'5px 12px'}}>Re-classify</button>
+        <button className="ing-btn danger" onClick={clearAll} disabled={loading} style={{fontSize:'.72rem',padding:'5px 12px'}}>Clear All Data</button>
       </div>
       {log.length>0&&<div className="ing-log">{log.map((l,i)=><div key={i}>{l.msg}</div>)}</div>}
     </div>
 
     {result&&!result.error&&<div className="card" style={{marginBottom:14}}>
       <div className="card-h">Found {result.databases_found} database(s)</div>
-      <table className="tbl"><thead><tr><th>Path</th><th>Browser</th><th>OS</th><th>User</th><th>Profile</th><th>Rows</th><th>Status</th></tr></thead><tbody>
+      <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Path</th><th>Browser</th><th>OS</th><th>User</th><th>Profile</th><th>Rows</th><th>Status</th></tr></thead><tbody>
         {(result.ingested||[]).map((e,i)=><tr key={i}>
           <td className="cell-u" style={{maxWidth:400}}>{e.path}</td>
           <td><BrowserBadge b={e.browser}/></td>
@@ -558,9 +758,9 @@ function IngestView(){
           <td className="cell-t">{e.user||'-'}</td>
           <td className="cell-t">{e.profile||'-'}</td>
           <td className="cell-t">{e.rows?.toLocaleString()}</td>
-          <td style={{color:e.status==='ingested'?'var(--green)':'var(--txt-2)'}}>{e.status}</td>
+          <td style={{color:e.status==='ingested'?'var(--green)':e.status==='carved'?'var(--amber)':'var(--txt-2)'}}>{e.status}</td>
         </tr>)}
-      </tbody></table>
+      </tbody></table></div>
     </div>}
 
     {result?.error&&<div className="card"><div className="card-h" style={{color:'var(--red)'}}>Error</div><p style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.78rem'}}>{result.error}</p></div>}
@@ -572,6 +772,14 @@ function IngestView(){
         <div><div className="stat-big">{(filterInfo.browser||[]).length}</div><div className="stat-sm">Browsers</div></div>
         <div><div className="stat-big">{(filterInfo.os_username||[]).length}</div><div className="stat-sm">Users</div></div>
         <div><div className="stat-big">{(filterInfo.tags||[]).length}</div><div className="stat-sm">Tag Types</div></div>
+        {filterInfo.time_range?.earliest&&<div>
+          <div className="stat-big" style={{fontSize:'.8rem'}}>{filterInfo.time_range.earliest.split('T')[0]}</div>
+          <div className="stat-sm">Earliest Visit</div>
+        </div>}
+        {filterInfo.time_range?.latest&&<div>
+          <div className="stat-big" style={{fontSize:'.8rem'}}>{filterInfo.time_range.latest.split('T')[0]}</div>
+          <div className="stat-sm">Latest Visit</div>
+        </div>}
       </div>
     </div>}
   </div>);
