@@ -467,7 +467,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <td className="cell-tl" title={r.title}>{r.title}</td>
           <td className="cell-u" title={r.full_url}>{r.full_url}</td>
           <td className="cell-t" style={{textAlign:'right'}}>{r.full_url?.length}</td>
-          <td>{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
+          <td>{(r.unfurl||[]).length>0&&<span className="badge" style={{background:'var(--amber-dim)',color:'var(--amber)',cursor:'pointer',fontSize:'.6rem'}} title="Has unfurled data - click row to see">{(r.unfurl||[]).length}</span>}{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
           <td><BrowserBadge b={r.browser}/></td>
           <td className="cell-tr">{r.transition_type}{r.transition_qualifiers?` (${r.transition_qualifiers})`:''}</td>
           <td className="cell-src" title={r.provenance_chain||r.source_db_path}>{r.source_db_path||r.provenance_chain||'-'}</td>
@@ -478,7 +478,15 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <span className="det-k">Title</span><span className="det-v">{r.title}</span>
           <span className="det-k">Host</span><span className="det-v">{r.dns_host}</span>
           <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
-          <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded}</span>
+          <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded||'-'}</span>
+          {r.query_string_decoded&&r.query_string_decoded.includes('=')&&<>
+            <span className="det-k" style={{color:'var(--green)',opacity:.7}}>Parsed Params</span>
+            <span className="det-v">{r.query_string_decoded.split('&').map((pair,i)=>{
+              const [k,...rest]=pair.split('=');
+              const v=rest.join('=');
+              return <div key={i} style={{marginBottom:2}}><span style={{color:'var(--txt-2)'}}>{k}</span><span style={{color:'var(--txt-2)'}}> = </span><span style={{color:'var(--green)'}}>{v}</span></div>
+            })}</span>
+          </>}
           <span className="det-k">Time (UTC)</span><span className="det-v">{r.visit_time_utc}</span>
           <span className="det-k">Visit Source</span><span className="det-v"><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></span>
           <span className="det-k">Transition</span><span className="det-v">{r.transition_type} {r.transition_qualifiers&&`[${r.transition_qualifiers}]`}</span>
@@ -492,6 +500,26 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <span className="det-k">File Source</span><span className="det-v" style={{color:'var(--blue)'}}>{r.source_db_path||'-'}</span>
           <span className="det-k">Provenance</span><span className="det-v" style={{fontSize:'.68rem'}}>{r.provenance_chain}</span>
           {(r.tags||[]).length>0&&<><span className="det-k">Tags</span><span className="det-v">{r.tags.map(t=><TagPill key={t} tag={t} onClick={()=>{setTag(t);setOffset(0)}}/>)}</span></>}
+          {(r.unfurl||[]).length>0&&<>
+            <span className="det-k" style={{color:'var(--amber)',gridColumn:'1/-1',textAlign:'left',marginTop:8,borderTop:'1px solid var(--border)',paddingTop:8}}>URL UNFURL</span>
+            <span className="det-v" style={{display:'none'}}/>
+            {r.unfurl.map((u,i)=><React.Fragment key={i}>
+              <span className="det-k" style={{color:
+                u.type==='search_terms'?'var(--green)':
+                u.type==='embedded_url'?'var(--accent)':
+                u.type==='embedded_timestamp'?'var(--amber)':
+                u.type==='geo_coords'||u.type==='geo_place'?'var(--purple)':
+                u.type==='protobuf'?'var(--blue)':
+                'var(--txt-2)'
+              }}>{u.type}: {u.key}</span>
+              <span className="det-v" style={{color:
+                u.type==='search_terms'?'var(--green)':
+                u.type==='embedded_timestamp'?'var(--amber)':
+                u.type==='geo_coords'||u.type==='geo_place'?'var(--purple)':
+                'var(--txt-0)'
+              }}>{u.value}</span>
+            </React.Fragment>)}
+          </>}
         </div></td></tr>}
       </React.Fragment>)}
     </tbody></table></div>)}

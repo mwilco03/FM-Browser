@@ -255,11 +255,15 @@ def api_search():
     rows = []
     for r in db.execute(sql, p + [limit, offset]).fetchall():
         row = {k: r[k] for k in r.keys()}
-        # Parse tags JSON for frontend
+        # Parse tags and unfurl JSON for frontend
         try:
             row["tags"] = json.loads(row.get("tags", "[]"))
         except (json.JSONDecodeError, TypeError):
             row["tags"] = []
+        try:
+            row["unfurl"] = json.loads(row.get("unfurl", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            row["unfurl"] = []
         rows.append(row)
 
     return jsonify({"total": total, "limit": limit, "offset": offset, "results": rows})
@@ -277,6 +281,10 @@ def api_visit(visit_id: int):
         result["tags"] = json.loads(result.get("tags", "[]"))
     except (json.JSONDecodeError, TypeError):
         result["tags"] = []
+    try:
+        result["unfurl"] = json.loads(result.get("unfurl", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        result["unfurl"] = []
     return jsonify(result)
 
 
@@ -481,9 +489,9 @@ def api_reingest():
         record = classify_visit(record)
         db.execute(
             f"UPDATE {TABLE_VISITS} SET dns_host=?, url_path=?, query_string_decoded=?, "
-            f"tags=? WHERE id=?",
+            f"tags=?, unfurl=? WHERE id=?",
             (record.dns_host, record.url_path, record.query_string_decoded,
-             json.dumps(record.tags), row["id"])
+             json.dumps(record.tags), json.dumps(record.unfurl), row["id"])
         )
         count += 1
 

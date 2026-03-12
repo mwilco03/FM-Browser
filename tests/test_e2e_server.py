@@ -39,6 +39,7 @@ SAMPLE_VISITS = [
         "from_visit_url": "",
         "visit_duration_ms": 5000,
         "tags": '["search_query"]',
+        "unfurl": '[{"type":"search_terms","key":"q","value":"forensic tools"}]',
     },
     {
         "provenance_chain": "test.7z > Users/bob/AppData/Local/Google/Chrome/Default/History",
@@ -62,6 +63,7 @@ SAMPLE_VISITS = [
         "from_visit_url": "https://mail.google.com/",
         "visit_duration_ms": 12000,
         "tags": '["cloud_storage"]',
+        "unfurl": '[]',
     },
     {
         "provenance_chain": "test.7z > Users/alice/Library/Safari/History.db",
@@ -85,6 +87,7 @@ SAMPLE_VISITS = [
         "from_visit_url": "https://www.google.com/",
         "visit_duration_ms": 3000,
         "tags": '["paste_site"]',
+        "unfurl": '[]',
     },
 ]
 
@@ -94,7 +97,7 @@ COLS = [
     "visit_time_utc", "full_url", "title", "dns_host", "url_path",
     "query_string_decoded", "visit_source", "visit_source_confidence",
     "transition_type", "transition_qualifiers", "from_visit_url",
-    "visit_duration_ms", "tags",
+    "visit_duration_ms", "tags", "unfurl",
 ]
 
 
