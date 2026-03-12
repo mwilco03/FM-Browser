@@ -69,6 +69,7 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .b-extension{background:var(--purple-dim);color:var(--purple)}
 .b-imported{background:var(--bg-3);color:var(--txt-1)}
 .b-unknown{background:var(--bg-3);color:var(--txt-2)}
+.b-carved{background:rgba(245,158,11,.15);color:#f59e0b;border:1px dashed #f59e0b}
 .b-likely{opacity:.65;border:1px dashed currentColor}
 .b-tag{background:var(--red-dim);color:var(--red);cursor:pointer}
 .b-tag:hover{background:var(--red);color:#fff}
@@ -183,8 +184,8 @@ const {useState,useEffect,useCallback,useRef,useMemo} = React;
 const PAGE = 50;
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',unknown:'b-unknown'};
-const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',unknown:'?'};
+const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',carved:'b-carved',unknown:'b-unknown'};
+const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',carved:'\u{1F52E}',unknown:'?'};
 
 // API token stored in sessionStorage; set via Security panel in Ingest tab
 function getToken(){return sessionStorage.getItem('api_token')||''}
@@ -757,7 +758,7 @@ function IngestView(){
           <td className="cell-t">{e.user||'-'}</td>
           <td className="cell-t">{e.profile||'-'}</td>
           <td className="cell-t">{e.rows?.toLocaleString()}</td>
-          <td style={{color:e.status==='ingested'?'var(--green)':'var(--txt-2)'}}>{e.status}</td>
+          <td style={{color:e.status==='ingested'?'var(--green)':e.status==='carved'?'var(--amber)':'var(--txt-2)'}}>{e.status}</td>
         </tr>)}
       </tbody></table></div>
     </div>}

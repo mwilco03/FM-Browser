@@ -632,7 +632,9 @@ def discover_databases(root: Path) -> List[Tuple[Path, str, SourceMetadata]]:
             continue
 
         try:
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            # immutable=1 prevents SQLite from checkpointing the WAL,
+            # preserving evidence integrity.  We parse the WAL separately.
+            with sqlite3.connect(f"file:{path}?immutable=1", uri=True) as conn:
                 engine = _probe_engine(conn)
                 if engine:
                     meta = detect_source_metadata(path, engine)
@@ -658,7 +660,8 @@ def ingest_database(db_path: Path, engine: str, meta: SourceMetadata, provenance
         return []
 
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        # immutable=1 prevents any write to evidence, including WAL checkpoint
+        with sqlite3.connect(f"file:{db_path}?immutable=1", uri=True) as conn:
             records = extractor(conn, meta, prov)
             LOG.info("Extracted %d visits from %s [%s/%s/%s]",
                      len(records), db_path.name, meta.browser, meta.os_platform, meta.os_username or "?")

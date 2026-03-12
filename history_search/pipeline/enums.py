@@ -45,6 +45,7 @@ class VisitSource(Enum):
     SYNCED = "synced"
     EXTENSION = "extension"
     IMPORTED = "imported"
+    CARVED = "carved"
     UNKNOWN = "unknown"
 
 

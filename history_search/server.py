@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, g, jsonify, request, send_file, send_from_directory
 
+from .pipeline.carve import carve_deleted_records
 from .pipeline.classify import classify_batch
 from .pipeline.constants import DEFAULT_SEARCH_LIMIT, INTERVAL_STRFTIME, MAX_SEARCH_LIMIT
 from .pipeline.extract import discover_files, extract_recursive
@@ -150,6 +151,33 @@ def run_pipeline(index_db: str, source_path: Path,
                 "os_platform": meta.os_platform, "user": meta.os_username,
                 "profile": meta.browser_profile, "rows": count, "status": "ingested"
             })
+
+            # Stage 5: Carve deleted records from WAL/freelist/slack
+            if engine not in ("teams_json",):
+                if on_progress:
+                    on_progress(f"Carving deleted records: {db_path.name}...")
+                active_urls = {r.full_url for r in records}
+                carved = carve_deleted_records(db_path, meta, provenance, active_urls)
+                if carved:
+                    carved = classify_batch(carved)
+                    # Ensure carved records keep their recovery tag
+                    for cr in carved:
+                        if "recovered_deleted" not in cr.tags:
+                            cr.tags.append("recovered_deleted")
+                            cr.tags = sorted(set(cr.tags))
+                    carved_count = insert_visits(
+                        index_db, carved, source_db=src_key + " [carved]",
+                        meta_browser=meta.browser, meta_platform=meta.os_platform,
+                        meta_username=meta.os_username, meta_profile=meta.browser_profile,
+                        meta_endpoint=meta.endpoint_name,
+                    )
+                    stats["total_new_rows"] += carved_count
+                    stats["ingested"].append({
+                        "path": src_key + " [carved]", "browser": meta.browser,
+                        "os_platform": meta.os_platform, "user": meta.os_username,
+                        "profile": meta.browser_profile, "rows": carved_count,
+                        "status": "carved"
+                    })
 
     finally:
         if tmp_dir:
