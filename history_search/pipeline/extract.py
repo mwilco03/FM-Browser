@@ -1,10 +1,23 @@
-"""Stage 1: Recursive archive extraction with provenance tracking."""
+"""Stage 1: Recursive archive extraction with provenance tracking.
+
+Portable extraction strategy:
+  1. zip/tar/tar.gz/tar.bz2 — stdlib zipfile/tarfile (always available)
+  2. .7z — py7zr if installed, else 7z CLI
+  3. .rar — rarfile if installed, else 7z CLI
+  4. Anything else — 7z CLI as last resort
+
+Install `pip install fm-browser[archives]` for fully portable mode
+(no system 7z/unzip/tar required).
+"""
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
+import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -14,6 +27,39 @@ from .models import ExtractedFile
 LOG = logging.getLogger("history_search.extract")
 
 ARCHIVE_EXTENSIONS = {".7z", ".zip", ".tgz", ".tar", ".gz", ".rar"}
+
+# Lazy-loaded optional libraries
+_py7zr = None
+_rarfile = None
+
+
+def _get_py7zr():
+    """Lazy import py7zr (optional dependency)."""
+    global _py7zr
+    if _py7zr is None:
+        try:
+            import py7zr
+            _py7zr = py7zr
+        except ImportError:
+            _py7zr = False
+    return _py7zr if _py7zr is not False else None
+
+
+def _get_rarfile():
+    """Lazy import rarfile (optional dependency)."""
+    global _rarfile
+    if _rarfile is None:
+        try:
+            import rarfile
+            _rarfile = rarfile
+        except ImportError:
+            _rarfile = False
+    return _rarfile if _rarfile is not False else None
+
+
+def _has_7z_cli() -> bool:
+    """Check if 7z command is available."""
+    return shutil.which("7z") is not None
 
 
 def _is_archive(path: Path) -> bool:
@@ -25,8 +71,43 @@ def _is_archive(path: Path) -> bool:
     return ".tar.gz" in suffixes or ".tar.bz2" in suffixes
 
 
-def _check_path_traversal(archive_path: Path, output_dir: Path) -> bool:
-    """Reject archives containing path traversal attempts."""
+# ---------------------------------------------------------------------------
+# Path-traversal safety
+# ---------------------------------------------------------------------------
+
+def _is_path_safe(member_name: str) -> bool:
+    """Reject archive members with path traversal components."""
+    return ".." not in Path(member_name).parts
+
+
+def _check_path_traversal_zip(archive_path: Path) -> bool:
+    """Check zip archive for path traversal using stdlib."""
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for name in zf.namelist():
+                if not _is_path_safe(name):
+                    LOG.warning("Path traversal detected in %s: %s", archive_path, name)
+                    return False
+    except (zipfile.BadZipFile, Exception):
+        pass
+    return True
+
+
+def _check_path_traversal_tar(archive_path: Path) -> bool:
+    """Check tar archive for path traversal using stdlib."""
+    try:
+        with tarfile.open(archive_path, "r:*") as tf:
+            for member in tf.getmembers():
+                if not _is_path_safe(member.name):
+                    LOG.warning("Path traversal detected in %s: %s", archive_path, member.name)
+                    return False
+    except (tarfile.TarError, Exception):
+        pass
+    return True
+
+
+def _check_path_traversal_7z_cli(archive_path: Path) -> bool:
+    """Check archive via 7z CLI listing (fallback)."""
     try:
         result = subprocess.run(
             ["7z", "l", str(archive_path)],
@@ -40,8 +121,94 @@ def _check_path_traversal(archive_path: Path, output_dir: Path) -> bool:
     return True
 
 
-def _try_extract_7z(archive_path: Path, dest: Path) -> bool:
-    """Try extracting with 7z using password list."""
+def _check_path_traversal(archive_path: Path, output_dir: Path) -> bool:
+    """Reject archives containing path traversal attempts."""
+    suffix = archive_path.suffix.lower()
+    suffixes = "".join(s.lower() for s in archive_path.suffixes)
+
+    if suffix == ".zip":
+        return _check_path_traversal_zip(archive_path)
+    elif ".tar" in suffixes or suffix in (".tgz", ".gz"):
+        return _check_path_traversal_tar(archive_path)
+    elif _has_7z_cli():
+        return _check_path_traversal_7z_cli(archive_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python extractors (stdlib)
+# ---------------------------------------------------------------------------
+
+def _try_extract_zip_python(archive_path: Path, dest: Path) -> bool:
+    """Extract zip using stdlib zipfile with password support."""
+    for password in ARCHIVE_PASSWORDS:
+        try:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                pwd = password.encode("utf-8") if password else None
+                for member in zf.infolist():
+                    if not _is_path_safe(member.filename):
+                        continue
+                    zf.extract(member, dest, pwd=pwd)
+                return True
+        except (RuntimeError, zipfile.BadZipFile):
+            # RuntimeError for bad password or unsupported compression
+            continue
+        except Exception as e:
+            LOG.debug("zipfile failed for %s: %s", archive_path, e)
+            continue
+    return False
+
+
+def _try_extract_tar_python(archive_path: Path, dest: Path) -> bool:
+    """Extract tar/tar.gz/tar.bz2 using stdlib tarfile."""
+    try:
+        with tarfile.open(archive_path, "r:*") as tf:
+            safe_members = [m for m in tf.getmembers() if _is_path_safe(m.name)]
+            tf.extractall(dest, members=safe_members)
+        return True
+    except (tarfile.TarError, Exception) as e:
+        LOG.debug("tarfile failed for %s: %s", archive_path, e)
+        return False
+
+
+def _try_extract_7z_python(archive_path: Path, dest: Path) -> bool:
+    """Extract .7z using py7zr (optional dependency)."""
+    py7zr = _get_py7zr()
+    if py7zr is None:
+        return False
+    for password in ARCHIVE_PASSWORDS:
+        try:
+            pwd = password if password else None
+            with py7zr.SevenZipFile(archive_path, "r", password=pwd) as sz:
+                sz.extractall(path=dest)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _try_extract_rar_python(archive_path: Path, dest: Path) -> bool:
+    """Extract .rar using rarfile (optional dependency)."""
+    rf = _get_rarfile()
+    if rf is None:
+        return False
+    for password in ARCHIVE_PASSWORDS:
+        try:
+            with rf.RarFile(archive_path, "r") as rar:
+                pwd = password if password else None
+                rar.extractall(dest, pwd=pwd)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# CLI-based extractors (fallback)
+# ---------------------------------------------------------------------------
+
+def _try_extract_7z_cli(archive_path: Path, dest: Path) -> bool:
+    """Try extracting with 7z CLI using password list."""
     for password in ARCHIVE_PASSWORDS:
         try:
             cmd = ["7z", "x", f"-o{dest}", "-y", str(archive_path)]
@@ -55,8 +222,8 @@ def _try_extract_7z(archive_path: Path, dest: Path) -> bool:
     return False
 
 
-def _try_extract_zip(archive_path: Path, dest: Path) -> bool:
-    """Try extracting zip with password list."""
+def _try_extract_zip_cli(archive_path: Path, dest: Path) -> bool:
+    """Try extracting zip with unzip CLI."""
     for password in ARCHIVE_PASSWORDS:
         try:
             cmd = ["unzip", "-o", str(archive_path), "-d", str(dest)]
@@ -68,12 +235,11 @@ def _try_extract_zip(archive_path: Path, dest: Path) -> bool:
                 return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
-    # Fallback to 7z for AES-encrypted zips
-    return _try_extract_7z(archive_path, dest)
+    return False
 
 
-def _try_extract_tar(archive_path: Path, dest: Path) -> bool:
-    """Extract tar/tar.gz/tgz archives."""
+def _try_extract_tar_cli(archive_path: Path, dest: Path) -> bool:
+    """Extract tar archives via CLI."""
     try:
         result = subprocess.run(
             ["tar", "xf", str(archive_path), "-C", str(dest)],
@@ -81,25 +247,50 @@ def _try_extract_tar(archive_path: Path, dest: Path) -> bool:
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return _try_extract_7z(archive_path, dest)
+        return False
 
+
+# ---------------------------------------------------------------------------
+# Dispatch: try Python first, fall back to CLI
+# ---------------------------------------------------------------------------
 
 def _extract_single(archive_path: Path, dest: Path) -> bool:
-    """Extract a single archive file to the destination directory."""
+    """Extract a single archive file to the destination directory.
+
+    Strategy: pure-Python first (portable), CLI fallback (for edge cases).
+    """
     dest.mkdir(parents=True, exist_ok=True)
     suffix = archive_path.suffix.lower()
     suffixes = "".join(s.lower() for s in archive_path.suffixes)
 
-    if suffix == ".7z":
-        return _try_extract_7z(archive_path, dest)
-    elif suffix == ".zip":
-        return _try_extract_zip(archive_path, dest)
+    if suffix == ".zip":
+        if _try_extract_zip_python(archive_path, dest):
+            return True
+        # AES-encrypted zips need CLI
+        if _try_extract_zip_cli(archive_path, dest):
+            return True
+        return _try_extract_7z_cli(archive_path, dest)
+
     elif ".tar" in suffixes or suffix in (".tgz", ".gz"):
-        return _try_extract_tar(archive_path, dest)
+        if _try_extract_tar_python(archive_path, dest):
+            return True
+        if _try_extract_tar_cli(archive_path, dest):
+            return True
+        return _try_extract_7z_cli(archive_path, dest)
+
+    elif suffix == ".7z":
+        if _try_extract_7z_python(archive_path, dest):
+            return True
+        return _try_extract_7z_cli(archive_path, dest)
+
     elif suffix == ".rar":
-        return _try_extract_7z(archive_path, dest)
+        if _try_extract_rar_python(archive_path, dest):
+            return True
+        return _try_extract_7z_cli(archive_path, dest)
+
     else:
-        return _try_extract_7z(archive_path, dest)
+        # Unknown format — try everything
+        return _try_extract_7z_cli(archive_path, dest)
 
 
 def _check_extraction_size(dest: Path) -> bool:

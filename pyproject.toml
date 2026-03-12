@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fm-browser"
+version = "1.0.0"
+description = "Forensic Browser History Search Engine"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=2.0",
+]
+
+[project.optional-dependencies]
+# Pure-Python archive support — removes need for p7zip-full system package
+archives = [
+    "py7zr>=0.20",
+    "rarfile>=4.0",
+]
+# Everything needed for a fully portable install
+portable = [
+    "fm-browser[archives]",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+fm-browser = "history_search.server:main"
+
+[tool.setuptools.packages.find]
+include = ["history_search*"]
+
+[tool.setuptools.package-data]
+"history_search" = ["static/**/*"]
