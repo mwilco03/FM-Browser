@@ -477,6 +477,8 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const[sortCol,setSortCol]=useState('time');
   const[sortDir,setSortDir]=useState('desc');
   const[decodeInput,setDecodeInput]=useState('');
+  const[searchMode,setSearchMode]=useState('fts');
+  const[searchError,setSearchError]=useState('');
   const sentinelRef=useRef(null);
   const loadingMore=useRef(false);
   const dq=useDebounce(q,300);
@@ -495,10 +497,10 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   },[initialFilters]);
 
   const doSearch=useCallback(async(query,off,append=false)=>{
-    setLoading(true);
+    setLoading(true);setSearchError('');
     loadingMore.current=true;
     const p={limit:PAGE,offset:off,sort:sortCol,sort_dir:sortDir};
-    if(query)p.q=query;
+    if(query){p.q=query;p.mode=searchMode}
     if(host)p.host=host;if(browser)p.browser=browser;
     if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
     if(tag)p.tag=tag;if(transType)p.transition_type=transType;
@@ -506,14 +508,18 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     if(endDate)p.end=endDate+'T23:59:59Z';
     if(excludeHosts.length)p.exclude_host=excludeHosts.join(',');
     try{
-      const res=await api.search(p);
-      setResults(res);
-      if(append){setAllRows(prev=>[...prev,...(res.results||[])])}
-      else{setAllRows(res.results||[])}
+      const resp=await fetch('/api/search?'+new URLSearchParams(p));
+      const res=await resp.json();
+      if(res.error){setSearchError(res.error);setResults({total:0,results:[]});setAllRows([]);}
+      else{
+        setResults(res);
+        if(append){setAllRows(prev=>[...prev,...(res.results||[])])}
+        else{setAllRows(res.results||[])}
+      }
     }catch(e){console.error(e)}
     setLoading(false);
     loadingMore.current=false;
-  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir,excludeHosts]);
+  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir,excludeHosts,searchMode]);
 
   // Reset on filter/query change
   useEffect(()=>{setOffset(0);setAllRows([]);doSearch(dq,0,false)},[dq,doSearch]);
@@ -553,11 +559,27 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   // Column definitions for sortable headers
   const COL_NUM = 10;
 
+  const modePlaceholders={
+    fts:'FTS5: "google maps", title:news, dns_host:github',
+    contains:'Substring match: matches anywhere in URL, title, host, query, tags',
+    regex:'Regex: \\.tk$, login.*admin, https?://10\\., (?i)password'
+  };
+  const modeHints={
+    fts:'Supports AND, OR, NOT, "quoted phrases", column:prefix queries',
+    contains:'Case-insensitive substring match across all text fields',
+    regex:'Python regex (re.search) across URL, title, host, query string, tags, unfurl'
+  };
+
   return(<div>
     <div className="search-wrap">
       <span className="search-ico">&#x1F50D;</span>
-      <input className="search-in" placeholder='Search visits (FTS5: "google maps", title:news, dns_host:github)' value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
-      <div className="search-hint">Supports AND, OR, NOT, "quoted phrases", column:prefix queries</div>
+      <input className="search-in" placeholder={modePlaceholders[searchMode]} value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
+      <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
+        <span style={{fontFamily:'var(--mono)',fontSize:'.62rem',color:'var(--txt-2)'}}>Mode:</span>
+        {['fts','contains','regex'].map(m=><button key={m} className="decode-btn" style={searchMode===m?{borderColor:'var(--accent)',color:'var(--accent)',background:'var(--accent-dim)'}:{}} onClick={()=>{setSearchMode(m);setOffset(0)}}>{m==='fts'?'FTS5':m==='contains'?'Contains':'Regex'}</button>)}
+        <span className="search-hint" style={{margin:0}}>{modeHints[searchMode]}</span>
+      </div>
+      {searchError&&<div style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.72rem',marginTop:4}}>{searchError}</div>}
     </div>
     <div className="filters">
       <input className="f-in" placeholder="host..." value={host} onChange={e=>{setHost(e.target.value);setOffset(0)}} onFocus={loadFilters} style={{width:150}}/>
