@@ -397,6 +397,108 @@ def run_tests():
             print(f"[FAIL] POST /api/ingest bad path — {r.status_code}")
             failed += 1
 
+        # ---------------------------------------------------------------
+        # GET /api/browse — file picker
+        # ---------------------------------------------------------------
+        r = client.get("/api/browse?path=/")
+        data = r.get_json()
+        if r.status_code == 200 and "entries" in data and "path" in data:
+            print("[PASS] GET /api/browse — lists root directory")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/browse — {data}")
+            failed += 1
+
+        # GET /api/browse — nonexistent path
+        r = client.get("/api/browse?path=/nonexistent_path_xyz")
+        if r.status_code == 404:
+            print("[PASS] GET /api/browse — 404 for bad path")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/browse bad path — {r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # POST /api/clear — wipe all data
+        # ---------------------------------------------------------------
+        r = client.post("/api/clear")
+        data = r.get_json()
+        if r.status_code == 200 and data.get("status") == "ok":
+            print("[PASS] POST /api/clear — data cleared")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/clear — {data}")
+            failed += 1
+
+        # Verify data is actually gone
+        r = client.get("/api/filters")
+        data = r.get_json()
+        if data.get("total_visits") == 0:
+            print("[PASS] POST /api/clear — verified 0 visits remain")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/clear verify — {data.get('total_visits')} remain")
+            failed += 1
+
+        # Re-seed for sort tests
+        seed_db(db_path)
+
+        # ---------------------------------------------------------------
+        # Sort by URL length
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?sort=url_length&sort_dir=desc")
+        data = r.get_json()
+        if r.status_code == 200 and len(data["results"]) >= 2:
+            lens = [len(row["full_url"]) for row in data["results"]]
+            if lens == sorted(lens, reverse=True):
+                print("[PASS] GET /api/search?sort=url_length — sorted desc")
+                passed += 1
+            else:
+                print(f"[FAIL] sort=url_length desc — lens={lens}")
+                failed += 1
+        else:
+            print(f"[FAIL] sort=url_length — {data}")
+            failed += 1
+
+        # Sort by host ascending
+        r = client.get("/api/search?sort=host&sort_dir=asc")
+        data = r.get_json()
+        if r.status_code == 200 and len(data["results"]) >= 2:
+            hosts = [row["dns_host"] for row in data["results"]]
+            if hosts == sorted(hosts):
+                print("[PASS] GET /api/search?sort=host&sort_dir=asc")
+                passed += 1
+            else:
+                print(f"[FAIL] sort=host asc — hosts={hosts}")
+                failed += 1
+        else:
+            print(f"[FAIL] sort=host asc — {data}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # File source (source_db_path) present in results
+        # ---------------------------------------------------------------
+        r = client.get("/api/search")
+        data = r.get_json()
+        if r.status_code == 200 and all("source_db_path" in row for row in data["results"]):
+            print("[PASS] Results include source_db_path (file source)")
+            passed += 1
+        else:
+            print(f"[FAIL] source_db_path missing from results")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # POST /api/ingest with clear=true
+        # ---------------------------------------------------------------
+        r = client.post("/api/ingest", json={"path": "/nonexistent/file.7z", "clear": True})
+        # Should still fail on nonexistent path (but clear param accepted)
+        if r.status_code == 400:
+            print("[PASS] POST /api/ingest with clear=true — accepts clear param")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/ingest clear — {r.status_code}")
+            failed += 1
+
     finally:
         os.unlink(db_path)
 

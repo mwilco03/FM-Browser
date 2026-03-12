@@ -1,6 +1,7 @@
 """Stage 2: Browser-specific SQLite extraction with per-visit granularity."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -12,6 +13,7 @@ from .constants import (
     CHROME_EPOCH_OFFSET_S, CHROME_TRANSITION_CORE, CHROME_TRANSITION_QUALIFIERS,
     CHROME_VISIT_SOURCE, FIREFOX_VISIT_TYPE, MACOS_BROWSER_PATHS,
     OS_PATH_INDICATORS, SAFARI_EPOCH_OFFSET_S, SCHEMA_PROBES,
+    TEAMS_LEVELDB_PATHS, TEAMS_LOG_PATHS,
     TICK_DIVISOR, WINDOWS_BROWSER_PATHS,
 )
 from .enums import Browser, BrowserEngine, BROWSER_ENGINE_MAP, OSPlatform
@@ -476,10 +478,130 @@ ENGINE_EXTRACTORS = {
 # Database discovery and ingestion orchestration
 # ---------------------------------------------------------------------------
 
+def _is_teams_json(path: Path) -> bool:
+    """Check if a file looks like a Teams JSON log with URL data."""
+    if path.suffix.lower() != ".json":
+        return False
+    path_str = str(path)
+    return any(p.search(path_str) for p in TEAMS_LOG_PATHS)
+
+
+def _is_teams_leveldb(path: Path) -> bool:
+    """Check if a path is inside a Teams LevelDB directory."""
+    path_str = str(path)
+    return any(p.search(path_str) for p in TEAMS_LEVELDB_PATHS)
+
+
+def extract_teams_json(json_path: Path, meta: SourceMetadata, provenance: str) -> List[VisitRecord]:
+    """Extract URL visits from Microsoft Teams JSON log files.
+
+    Teams stores activity in JSON files that can contain URLs visited
+    within the app (meeting links, shared links, tab URLs, etc.).
+    """
+    records = []
+    try:
+        with open(json_path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        LOG.debug("Teams JSON parse error %s: %s", json_path, e)
+        return records
+
+    # Teams JSON can be a list of events or a dict with events
+    events = []
+    if isinstance(data, list):
+        events = data
+    elif isinstance(data, dict):
+        # Look for common Teams JSON keys
+        for key in ("events", "messages", "activities", "history", "items"):
+            if key in data and isinstance(data[key], list):
+                events = data[key]
+                break
+        if not events:
+            # Single-level dict might be one event
+            events = [data]
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+
+        # Extract URLs from various Teams JSON formats
+        url = (event.get("url") or event.get("href") or
+               event.get("targetUrl") or event.get("link") or
+               event.get("contentUrl") or event.get("meetingUrl") or "")
+
+        if not url or not url.startswith(("http://", "https://")):
+            # Try to find URLs in message content
+            content = event.get("content") or event.get("body") or event.get("text") or ""
+            if isinstance(content, dict):
+                content = content.get("content", "")
+            urls_in_content = re.findall(r'https?://[^\s<>"\']+', str(content))
+            if urls_in_content:
+                url = urls_in_content[0]
+            else:
+                continue
+
+        # Timestamp
+        ts = ""
+        for ts_key in ("timestamp", "time", "createdDateTime", "composetime",
+                        "originalarrivaltime", "arrivalTime", "date"):
+            raw_ts = event.get(ts_key)
+            if raw_ts:
+                ts = _parse_teams_timestamp(raw_ts)
+                if ts:
+                    break
+
+        title = (event.get("title") or event.get("subject") or
+                 event.get("displayName") or event.get("name") or "")
+
+        records.append(VisitRecord(
+            provenance_chain=provenance,
+            source_db_path=str(json_path),
+            os_platform=meta.os_platform,
+            browser="teams",
+            browser_engine="chromium",
+            browser_profile=meta.browser_profile or "Teams",
+            os_username=meta.os_username,
+            endpoint_name=meta.endpoint_name,
+            visit_time_utc=ts,
+            full_url=url,
+            title=str(title),
+            visit_source="local",
+            visit_source_confidence="confirmed",
+            transition_type="link",
+        ))
+
+    if records:
+        LOG.info("Extracted %d URLs from Teams JSON: %s", len(records), json_path.name)
+    return records
+
+
+def _parse_teams_timestamp(raw: Any) -> str:
+    """Parse various Teams timestamp formats to ISO-8601 UTC."""
+    if not raw:
+        return ""
+    s = str(raw)
+    # Already ISO-8601
+    if re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", s):
+        if not s.endswith("Z") and "+" not in s:
+            s += "Z"
+        return s
+    # Unix epoch (seconds or ms)
+    try:
+        ts_num = float(s)
+        if ts_num > 1e12:  # milliseconds
+            ts_num /= 1000
+        if 0 < ts_num < 4102444800:
+            return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        pass
+    return ""
+
+
 def discover_databases(root: Path) -> List[Tuple[Path, str, SourceMetadata]]:
     """Walk a directory tree and find all browser history SQLite databases.
 
     Returns list of (db_path, engine_name, source_metadata).
+    Also discovers Teams JSON logs as (json_path, 'teams_json', metadata).
     """
     results = []
     seen_inodes: Set[int] = set()
@@ -496,6 +618,14 @@ def discover_databases(root: Path) -> List[Tuple[Path, str, SourceMetadata]]:
                 continue
             seen_inodes.add(ino)
         except OSError:
+            continue
+
+        # Check for Teams JSON files
+        if _is_teams_json(path):
+            meta = detect_source_metadata(path, "chromium")
+            meta.browser = "teams"
+            meta.browser_engine = "chromium"
+            results.append((path, "teams_json", meta))
             continue
 
         if not _has_sqlite_header(path):
@@ -516,12 +646,17 @@ def discover_databases(root: Path) -> List[Tuple[Path, str, SourceMetadata]]:
 
 def ingest_database(db_path: Path, engine: str, meta: SourceMetadata, provenance: str = "") -> List[VisitRecord]:
     """Extract all visit records from a single browser history database."""
+    prov = provenance or str(db_path)
+
+    # Handle Teams JSON files
+    if engine == "teams_json":
+        return extract_teams_json(db_path, meta, prov)
+
     extractor = ENGINE_EXTRACTORS.get(engine)
     if not extractor:
         LOG.warning("No extractor for engine: %s", engine)
         return []
 
-    prov = provenance or str(db_path)
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             records = extractor(conn, meta, prov)

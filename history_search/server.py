@@ -217,11 +217,28 @@ def api_search():
     limit = min(int(request.args.get("limit", DEFAULT_SEARCH_LIMIT)), MAX_SEARCH_LIMIT)
     offset = int(request.args.get("offset", 0))
     sort = request.args.get("sort", "rank" if q else "time")
+    sort_dir = request.args.get("sort_dir", "desc").upper()
+    if sort_dir not in ("ASC", "DESC"):
+        sort_dir = "DESC"
     f = _get_filters()
+
+    # Build ORDER BY clause
+    SORT_MAP = {
+        "time": f"v.visit_time_utc {sort_dir}",
+        "host": f"v.dns_host {sort_dir}",
+        "title": f"v.title {sort_dir}",
+        "browser": f"v.browser {sort_dir}",
+        "url": f"v.full_url {sort_dir}",
+        "url_length": f"LENGTH(v.full_url) {sort_dir}",
+        "source": f"v.visit_source {sort_dir}",
+        "transition": f"v.transition_type {sort_dir}",
+        "duration": f"v.visit_duration_ms {sort_dir}",
+        "file_source": f"v.source_db_path {sort_dir}",
+    }
 
     if q:
         w, p = _build_where(f, fts_q=q)
-        order = "rank" if sort == "rank" else "v.visit_time_utc DESC"
+        order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
                f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
                f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
@@ -229,8 +246,9 @@ def api_search():
                 f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid WHERE {w}")
     else:
         w, p = _build_where(f)
+        order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
         sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
-               f"WHERE {w} ORDER BY v.visit_time_utc DESC LIMIT ? OFFSET ?")
+               f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
         csql = f"SELECT COUNT(*) FROM {TABLE_VISITS} v WHERE {w}"
 
     total = db.execute(csql, p).fetchone()[0]
@@ -374,17 +392,75 @@ def api_heatmap():
     return jsonify({"cells": [dict(r) for r in rows]})
 
 
+@app.route("/api/browse")
+def api_browse():
+    """Browse server filesystem for file picker."""
+    target = request.args.get("path", "/")
+    target = Path(target).resolve()
+    if not target.exists():
+        return jsonify({"error": "path not found", "path": str(target)}), 404
+    if not target.is_dir():
+        # If it's a file, return parent listing with this file highlighted
+        target = target.parent
+
+    entries = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            try:
+                stat = entry.stat()
+                entries.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "is_dir": entry.is_dir(),
+                    "size": stat.st_size if not entry.is_dir() else None,
+                    "ingestable": (
+                        entry.is_dir()
+                        or entry.suffix.lower() in (".7z", ".zip", ".tar", ".gz", ".tgz")
+                        or entry.name.endswith(".tar.gz")
+                    ),
+                })
+            except (PermissionError, OSError):
+                continue
+    except PermissionError:
+        return jsonify({"error": "permission denied", "path": str(target)}), 403
+
+    return jsonify({
+        "path": str(target),
+        "parent": str(target.parent) if target != target.parent else None,
+        "entries": entries,
+    })
+
+
+@app.route("/api/clear", methods=["POST"])
+def api_clear():
+    """Wipe all visit data and ingest log, keeping schema intact."""
+    db = _get_db()
+    db.execute(f"DELETE FROM {TABLE_VISITS}")
+    db.execute("DELETE FROM ingest_log")
+    db.commit()
+    rebuild_fts(g.db_path)
+    return jsonify({"status": "ok", "message": "All data cleared"})
+
+
 @app.route("/api/ingest", methods=["POST"])
 def api_ingest():
     """Accept archive/directory path and run the full pipeline."""
     body = request.get_json(silent=True) or {}
     path_str = body.get("path", "")
+    clear_first = body.get("clear", False)
     if not path_str:
         return jsonify({"error": "path required"}), 400
 
     target = Path(path_str).resolve()
     if not target.exists():
         return jsonify({"error": f"not found: {target}"}), 400
+
+    if clear_first:
+        db = _get_db()
+        db.execute(f"DELETE FROM {TABLE_VISITS}")
+        db.execute("DELETE FROM ingest_log")
+        db.commit()
+        rebuild_fts(g.db_path)
 
     stats = run_pipeline(g.db_path, target)
     return jsonify(stats)
