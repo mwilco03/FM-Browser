@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forensic History Search</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-0:#08090c; --bg-1:#0e1017; --bg-2:#151720; --bg-3:#1e2030; --bg-4:#272a3a;
+  --border:#2a2d40; --border-hi:#3d4160;
+  --txt-0:#e4e6f0; --txt-1:#9da2be; --txt-2:#636887;
+  --accent:#5b8aff; --accent-dim:rgba(91,138,255,.12);
+  --amber:#f59e0b; --amber-dim:rgba(245,158,11,.1);
+  --green:#34d399; --green-dim:rgba(52,211,153,.1);
+  --red:#ef4444; --red-dim:rgba(239,68,68,.1);
+  --purple:#a78bfa; --purple-dim:rgba(167,139,250,.1);
+  --blue:#38bdf8; --blue-dim:rgba(56,189,248,.1);
+  --mono:'IBM Plex Mono',monospace; --sans:'DM Sans',system-ui,sans-serif;
+  --r:5px; --r-lg:8px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:13.5px}
+body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-height:100vh;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg-1)}
+::-webkit-scrollbar-thumb{background:var(--bg-3);border-radius:3px}
+.shell{max-width:1520px;margin:0 auto;padding:20px 28px}
+
+/* Header */
+.hdr{display:flex;align-items:center;gap:14px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.hdr-logo{font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--accent);letter-spacing:-.5px}
+.hdr-logo span{color:var(--txt-2);font-weight:400}
+.hdr-meta{margin-left:auto;font-family:var(--mono);font-size:.72rem;color:var(--txt-2)}
+
+/* Tabs */
+.tabs{display:flex;gap:2px;background:var(--bg-1);padding:3px;border-radius:var(--r);margin-bottom:20px;width:fit-content}
+.tab{font-family:var(--sans);font-size:.8rem;font-weight:500;padding:7px 20px;border-radius:4px;border:none;background:0;color:var(--txt-2);cursor:pointer;transition:.15s}
+.tab:hover{color:var(--txt-1)}
+.tab.on{background:var(--bg-3);color:var(--txt-0);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+
+/* Search */
+.search-wrap{position:relative;margin-bottom:14px}
+.search-in{width:100%;font-family:var(--mono);font-size:.9rem;padding:13px 16px 13px 42px;background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);color:var(--txt-0);outline:0;transition:.2s}
+.search-in::placeholder{color:var(--txt-2)}
+.search-in:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.search-ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--txt-2);font-size:.95rem;pointer-events:none}
+.search-hint{font-family:var(--mono);font-size:.65rem;color:var(--txt-2);margin-top:4px;padding-left:4px}
+
+/* Filters */
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+.f-sel,.f-in{font-family:var(--mono);font-size:.73rem;padding:5px 9px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-1);outline:0}
+.f-sel:focus,.f-in:focus{border-color:var(--accent)}
+.f-sel option{background:var(--bg-2)}
+.f-meta{font-family:var(--mono);font-size:.72rem;color:var(--txt-2);margin-left:auto}
+.f-meta em{color:var(--amber);font-style:normal}
+.f-clear{font-family:var(--mono);font-size:.68rem;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r);background:0;color:var(--txt-2);cursor:pointer}
+.f-clear:hover{color:var(--red);border-color:var(--red)}
+
+/* Badges */
+.badge{font-family:var(--mono);font-size:.68rem;padding:2px 7px;border-radius:3px;display:inline-block;font-weight:500;margin-right:2px}
+.b-local{background:var(--green-dim);color:var(--green)}
+.b-synced{background:var(--blue-dim);color:var(--blue)}
+.b-extension{background:var(--purple-dim);color:var(--purple)}
+.b-imported{background:var(--bg-3);color:var(--txt-1)}
+.b-unknown{background:var(--bg-3);color:var(--txt-2)}
+.b-likely{opacity:.65;border:1px dashed currentColor}
+.b-tag{background:var(--red-dim);color:var(--red);cursor:pointer}
+.b-tag:hover{background:var(--red);color:#fff}
+.b-browser{background:var(--green-dim);color:var(--green)}
+.b-os{background:var(--purple-dim);color:var(--purple)}
+
+/* Table */
+.tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:1}
+.tbl td{padding:7px 10px;border-bottom:1px solid rgba(42,45,64,.4);vertical-align:top;line-height:1.5}
+.tbl tr:hover td{background:var(--bg-1)}
+.cell-t{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);white-space:nowrap}
+.cell-h{font-family:var(--mono);font-size:.74rem;color:var(--amber);cursor:pointer}
+.cell-h:hover{text-decoration:underline}
+.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-tl{color:var(--txt-0);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-q{font-family:var(--mono);font-size:.68rem;color:var(--green);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell-tr{font-family:var(--mono);font-size:.68rem;color:var(--txt-2)}
+
+/* Detail expand */
+.det td{background:var(--bg-1)!important;padding:12px 18px!important}
+.det-grid{display:grid;grid-template-columns:140px 1fr;gap:3px 12px;font-size:.75rem}
+.det-k{font-family:var(--mono);color:var(--txt-2);text-align:right}
+.det-v{font-family:var(--mono);color:var(--txt-0);word-break:break-all}
+
+/* Pagination */
+.pgn{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.pg-btn{font-family:var(--mono);font-size:.74rem;padding:5px 13px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg-2);color:var(--txt-1);cursor:pointer}
+.pg-btn:disabled{opacity:.3;cursor:default}
+.pg-btn:hover:not(:disabled){border-color:var(--accent);color:var(--txt-0)}
+
+/* Cards */
+.dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.card{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px}
+.card-h{font-family:var(--mono);font-size:.7rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:10px}
+
+/* Bars */
+.bar-item{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:.76rem}
+.bar-lbl{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);min-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;cursor:pointer}
+.bar-lbl:hover{color:var(--amber);text-decoration:underline}
+.bar-trk{flex:1;height:16px;background:var(--bg-2);border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px;transition:width .5s cubic-bezier(.4,0,.2,1);min-width:2px}
+.bar-ct{font-family:var(--mono);font-size:.68rem;color:var(--txt-2);min-width:52px}
+
+/* Timeline canvas */
+.tl-canvas{width:100%;height:160px;display:block}
+
+/* Chips */
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.chip{font-family:var(--mono);font-size:.74rem;padding:6px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg-2);color:var(--txt-1);cursor:pointer;transition:.15s}
+.chip:hover{border-color:var(--accent);color:var(--txt-0)}
+.chip.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* Interval buttons */
+.iv-btns{display:flex;gap:3px;margin-bottom:10px}
+.iv-btn{font-family:var(--mono);font-size:.68rem;padding:3px 10px;border:1px solid var(--border);border-radius:3px;background:0;color:var(--txt-2);cursor:pointer}
+.iv-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* Heatmap */
+.hm-grid{display:grid;grid-template-columns:48px repeat(24,1fr);gap:2px;font-family:var(--mono);font-size:.6rem}
+.hm-cell{aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);font-size:.55rem}
+.hm-lbl{display:flex;align-items:center;justify-content:flex-end;padding-right:6px;color:var(--txt-2);font-size:.65rem}
+.hm-hlbl{display:flex;align-items:center;justify-content:center;color:var(--txt-2);font-size:.6rem}
+
+/* Ingest */
+.ing-panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;margin-bottom:14px}
+.ing-row{display:flex;gap:8px}
+.ing-in{flex:1;font-family:var(--mono);font-size:.82rem;padding:10px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);color:var(--txt-0);outline:0}
+.ing-btn{font-family:var(--mono);font-size:.78rem;padding:10px 18px;border:none;border-radius:var(--r);background:var(--accent);color:#fff;cursor:pointer;font-weight:500}
+.ing-btn:disabled{opacity:.5}
+.ing-btn.sec{background:var(--bg-3);color:var(--txt-1);border:1px solid var(--border)}
+.ing-btn.sec:hover{border-color:var(--accent)}
+.ing-log{margin-top:12px;font-family:var(--mono);font-size:.72rem;color:var(--txt-1);max-height:120px;overflow-y:auto;background:var(--bg-0);padding:10px;border-radius:var(--r);border:1px solid var(--border)}
+.ing-log div{padding:2px 0}
+
+/* Stats */
+.stat-row{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:18px}
+.stat-big{font-family:var(--mono);font-size:1.8rem;font-weight:700;color:var(--txt-0);line-height:1}
+.stat-sm{font-size:.74rem;color:var(--txt-2);margin-top:3px}
+
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .6s linear infinite;margin-right:5px;vertical-align:middle}
+@keyframes sp{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:50px 20px;color:var(--txt-2)}
+.empty h3{font-family:var(--mono);font-size:.95rem;color:var(--txt-1);margin-bottom:6px}
+.explore-prompt{text-align:center;padding:60px 20px;color:var(--txt-2);font-family:var(--mono);font-size:.85rem}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef,useMemo} = React;
+
+const PAGE = 50;
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',unknown:'b-unknown'};
+const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',unknown:'?'};
+
+const api = {
+  search: p => fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
+  visit: id => fetch('/api/visit/'+id).then(r=>r.json()),
+  aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(r=>r.json()),
+  filters: () => fetch('/api/filters').then(r=>r.json()),
+  heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
+  ingest: path => fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})}).then(r=>r.json()),
+  reingest: () => fetch('/api/reingest',{method:'POST'}).then(r=>r.json()),
+  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(r=>r.json()),
+};
+
+function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
+
+// Shared components
+function Spin(){return <span className="spinner"/>}
+function SourceBadge({source,confidence}){
+  const cls = SOURCE_CLS[source]||'b-unknown';
+  const likely = confidence==='likely' ? ' b-likely' : '';
+  const icon = SOURCE_ICONS[source]||'?';
+  const tip = confidence==='likely' ? `Likely ${source} (heuristic)` : source;
+  return <span className={`badge ${cls}${likely}`} title={tip}>{icon} {source}</span>
+}
+function TagPill({tag,onClick}){return <span className="badge b-tag" onClick={onClick}>{tag}</span>}
+function BrowserBadge({b}){return <span className="badge b-browser">{b}</span>}
+function OsBadge({o}){return <span className="badge b-os">{o}</span>}
+
+function BarChart({items,maxItems=20,color='var(--accent)',onClickLabel}){
+  const top = items.slice(0,maxItems);
+  const mx = Math.max(...top.map(i=>i.count),1);
+  return <div>{top.map((it,i)=>(
+    <div key={it.label||i} className="bar-item">
+      <span className="bar-lbl" title={it.label} onClick={()=>onClickLabel&&onClickLabel(it.label)}>{it.label||'(empty)'}</span>
+      <div className="bar-trk"><div className="bar-fill" style={{width:`${(it.count/mx)*100}%`,background:color}}/></div>
+      <span className="bar-ct">{it.count.toLocaleString()}</span>
+    </div>
+  ))}</div>
+}
+
+function TimelineChart({buckets}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const c=ref.current;if(!c||!buckets.length)return;
+    const ctx=c.getContext('2d'),dpr=devicePixelRatio||1,r=c.getBoundingClientRect();
+    c.width=r.width*dpr;c.height=r.height*dpr;ctx.scale(dpr,dpr);
+    const W=r.width,H=r.height;ctx.clearRect(0,0,W,H);
+    const mx=Math.max(...buckets.map(b=>b.count),1);
+    const bw=Math.max(1,(W-20)/buckets.length-1);
+    buckets.forEach((b,i)=>{
+      const x=10+i*(bw+1),bH=(b.count/mx)*(H-28),y=H-16-bH;
+      ctx.fillStyle='rgba(91,138,255,.7)';ctx.beginPath();
+      if(ctx.roundRect)ctx.roundRect(x,y,bw,bH,2);else{ctx.rect(x,y,bw,bH)}
+      ctx.fill();
+    });
+    ctx.fillStyle='#636887';ctx.font='10px IBM Plex Mono';
+    ctx.textAlign='left';if(buckets[0])ctx.fillText(buckets[0].label,10,H-2);
+    ctx.textAlign='right';const last=buckets[buckets.length-1];if(last)ctx.fillText(last.label,W-10,H-2);
+  },[buckets]);
+  return <canvas ref={ref} className="tl-canvas"/>
+}
+
+function Heatmap({cells}){
+  const mx=Math.max(...cells.map(c=>c.count),1);
+  const grid=Array.from({length:7},()=>Array(24).fill(0));
+  cells.forEach(c=>{if(c.dow>=0&&c.dow<7&&c.hour>=0&&c.hour<24)grid[c.dow][c.hour]=c.count});
+  const interp=(v)=>{
+    const t=v/mx;if(t===0)return 'var(--bg-2)';
+    const r=Math.round(91+t*(239-91)),g_=Math.round(138+t*(68-138)),b=Math.round(255+t*(68-255));
+    return `rgb(${r},${g_},${b})`;
+  };
+  return(<div className="hm-grid">
+    <div/>{Array.from({length:24},(_,h)=><div key={h} className="hm-hlbl">{h}</div>)}
+    {DAYS.map((day,d)=><React.Fragment key={d}>
+      <div className="hm-lbl">{day}</div>
+      {Array.from({length:24},(_,h)=>{
+        const v=grid[d][h];
+        return <div key={h} className="hm-cell" style={{background:interp(v)}} title={`${day} ${h}:00 - ${v}`}>{v>0?v:''}</div>
+      })}
+    </React.Fragment>)}
+  </div>);
+}
+
+// ============================================================
+// SEARCH VIEW
+// ============================================================
+function SearchView({initialFilters,onDrillHost,onDrillTag}){
+  const[q,setQ]=useState('');
+  const[host,setHost]=useState(initialFilters?.host||'');
+  const[browser,setBrowser]=useState(initialFilters?.browser||'');
+  const[visitSource,setVisitSource]=useState(initialFilters?.visit_source||'');
+  const[osPlatform,setOsPlatform]=useState(initialFilters?.os_platform||'');
+  const[tag,setTag]=useState(initialFilters?.tag||'');
+  const[transType,setTransType]=useState(initialFilters?.transition_type||'');
+  const[results,setResults]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[offset,setOffset]=useState(0);
+  const[expanded,setExpanded]=useState(null);
+  const[filterOpts,setFilterOpts]=useState(null);
+  const dq=useDebounce(q,300);
+
+  // Lazy-load filter options on first interaction
+  const loadFilters=useCallback(()=>{if(!filterOpts)api.filters().then(setFilterOpts).catch(()=>{})},[filterOpts]);
+
+  // Apply drilled filters from Explore
+  useEffect(()=>{
+    if(initialFilters?.host)setHost(initialFilters.host);
+    if(initialFilters?.browser)setBrowser(initialFilters.browser);
+    if(initialFilters?.visit_source)setVisitSource(initialFilters.visit_source);
+    if(initialFilters?.os_platform)setOsPlatform(initialFilters.os_platform);
+    if(initialFilters?.tag)setTag(initialFilters.tag);
+    if(initialFilters?.transition_type)setTransType(initialFilters.transition_type);
+  },[initialFilters]);
+
+  const doSearch=useCallback(async(query,off)=>{
+    setLoading(true);
+    const p={limit:PAGE,offset:off};
+    if(query)p.q=query;
+    if(host)p.host=host;if(browser)p.browser=browser;
+    if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
+    if(tag)p.tag=tag;if(transType)p.transition_type=transType;
+    try{setResults(await api.search(p))}catch(e){console.error(e)}
+    setLoading(false);
+  },[host,browser,visitSource,osPlatform,tag,transType]);
+
+  useEffect(()=>{setOffset(0);doSearch(dq,0)},[dq,doSearch]);
+  useEffect(()=>{doSearch(dq,offset)},[offset]);
+
+  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setOffset(0)};
+  const hasFilters=host||browser||visitSource||osPlatform||tag||transType;
+  const total=results?.total||0, rows=results?.results||[];
+
+  return(<div>
+    <div className="search-wrap">
+      <span className="search-ico">&#x1F50D;</span>
+      <input className="search-in" placeholder='Search visits (FTS5: "google maps", title:news, dns_host:github)' value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
+      <div className="search-hint">Supports AND, OR, NOT, "quoted phrases", column:prefix queries</div>
+    </div>
+    <div className="filters">
+      <input className="f-in" placeholder="host..." value={host} onChange={e=>{setHost(e.target.value);setOffset(0)}} onFocus={loadFilters} style={{width:150}}/>
+      <select className="f-sel" value={browser} onChange={e=>{setBrowser(e.target.value);setOffset(0)}} onFocus={loadFilters}>
+        <option value="">All browsers</option>
+        {(filterOpts?.browser||['chrome','safari','firefox','edge','brave']).map(b=><option key={b} value={b}>{b}</option>)}
+      </select>
+      <select className="f-sel" value={visitSource} onChange={e=>{setVisitSource(e.target.value);setOffset(0)}} onFocus={loadFilters}>
+        <option value="">All sources</option>
+        {(filterOpts?.visit_source||['local','synced','extension','imported']).map(s=><option key={s} value={s}>{s}</option>)}
+      </select>
+      <select className="f-sel" value={osPlatform} onChange={e=>{setOsPlatform(e.target.value);setOffset(0)}} onFocus={loadFilters}>
+        <option value="">All OS</option>
+        {(filterOpts?.os_platform||['macos','windows','linux']).map(o=><option key={o} value={o}>{o}</option>)}
+      </select>
+      <select className="f-sel" value={transType} onChange={e=>{setTransType(e.target.value);setOffset(0)}} onFocus={loadFilters}>
+        <option value="">All transitions</option>
+        {(filterOpts?.transition_type||['typed','link','bookmark','reload','form_submit','redirect_permanent','redirect_temporary']).map(t=><option key={t} value={t}>{t}</option>)}
+      </select>
+      {tag&&<span className="badge b-tag" style={{cursor:'pointer'}} onClick={()=>{setTag('');setOffset(0)}}>{tag} x</span>}
+      {hasFilters&&<button className="f-clear" onClick={clearFilters}>Clear all</button>}
+      {loading&&<Spin/>}
+      <span className="f-meta"><em>{total.toLocaleString()}</em> results</span>
+    </div>
+
+    {rows.length===0&&!loading?<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>:(
+    <div style={{overflowX:'auto'}}><table className="tbl"><thead><tr>
+      <th>Time</th><th>Source</th><th>Host</th><th>Title</th><th>URL</th><th>Tags</th><th>Browser</th><th>Transition</th>
+    </tr></thead><tbody>
+      {rows.map(r=><React.Fragment key={r.id}>
+        <tr onClick={()=>setExpanded(expanded===r.id?null:r.id)} style={{cursor:'pointer'}}>
+          <td className="cell-t">{r.visit_time_utc?.replace('T',' ').replace('Z','')}</td>
+          <td><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></td>
+          <td><span className="cell-h" onClick={e=>{e.stopPropagation();setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</span></td>
+          <td className="cell-tl" title={r.title}>{r.title}</td>
+          <td className="cell-u" title={r.full_url}>{r.full_url}</td>
+          <td>{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
+          <td><BrowserBadge b={r.browser}/></td>
+          <td className="cell-tr">{r.transition_type}{r.transition_qualifiers?` (${r.transition_qualifiers})`:''}</td>
+        </tr>
+        {expanded===r.id&&<tr className="det"><td colSpan={8}><div className="det-grid">
+          <span className="det-k">URL</span><span className="det-v">{r.full_url}</span>
+          <span className="det-k">Title</span><span className="det-v">{r.title}</span>
+          <span className="det-k">Host</span><span className="det-v">{r.dns_host}</span>
+          <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
+          <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded}</span>
+          <span className="det-k">Time</span><span className="det-v">{r.visit_time_utc}</span>
+          <span className="det-k">Visit Source</span><span className="det-v"><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></span>
+          <span className="det-k">Transition</span><span className="det-v">{r.transition_type} {r.transition_qualifiers&&`[${r.transition_qualifiers}]`}</span>
+          <span className="det-k">Duration</span><span className="det-v">{r.visit_duration_ms>0?`${(r.visit_duration_ms/1000).toFixed(1)}s`:'-'}</span>
+          <span className="det-k">From Visit</span><span className="det-v">{r.from_visit_url||'-'}</span>
+          <span className="det-k">User</span><span className="det-v">{r.os_username||'-'}</span>
+          <span className="det-k">Profile</span><span className="det-v">{r.browser_profile||'-'}</span>
+          <span className="det-k">Platform</span><span className="det-v">{r.os_platform}</span>
+          <span className="det-k">Engine</span><span className="det-v">{r.browser_engine}</span>
+          <span className="det-k">Endpoint</span><span className="det-v">{r.endpoint_name||'-'}</span>
+          <span className="det-k">Provenance</span><span className="det-v" style={{fontSize:'.68rem'}}>{r.provenance_chain}</span>
+          {(r.tags||[]).length>0&&<><span className="det-k">Tags</span><span className="det-v">{r.tags.map(t=><TagPill key={t} tag={t} onClick={()=>{setTag(t);setOffset(0)}}/>)}</span></>}
+        </div></td></tr>}
+      </React.Fragment>)}
+    </tbody></table></div>)}
+
+    {total>PAGE&&<div className="pgn">
+      <button className="pg-btn" disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-PAGE))}>Prev</button>
+      <span className="f-meta">{offset+1}-{Math.min(offset+PAGE,total)} of {total.toLocaleString()}</span>
+      <button className="pg-btn" disabled={offset+PAGE>=total} onClick={()=>setOffset(offset+PAGE)}>Next</button>
+    </div>}
+  </div>);
+}
+
+// ============================================================
+// EXPLORE VIEW
+// ============================================================
+const DIMENSIONS = [
+  {key:'dns_host',label:'Hosts',color:'var(--amber)'},
+  {key:'browser',label:'Browsers',color:'var(--green)'},
+  {key:'os_platform',label:'Platforms',color:'var(--purple)'},
+  {key:'os_username',label:'Users',color:'var(--blue)'},
+  {key:'browser_profile',label:'Profiles',color:'var(--txt-1)'},
+  {key:'endpoint_name',label:'Endpoints',color:'var(--accent)'},
+  {key:'visit_source',label:'Visit Source',color:'var(--blue)'},
+  {key:'transition_type',label:'Transitions',color:'var(--green)'},
+  {key:'tags',label:'Tags',color:'var(--red)'},
+];
+const TIME_DIMS = [
+  {key:'time_hour',label:'Hour'},{key:'time_day',label:'Day'},
+  {key:'time_week',label:'Week'},{key:'time_month',label:'Month'},
+];
+
+function ExploreView({onDrillToSearch}){
+  const[dim,setDim]=useState(null);
+  const[timeDim,setTimeDim]=useState(null);
+  const[data,setData]=useState([]);
+  const[timeData,setTimeData]=useState([]);
+  const[loading,setLoading]=useState(false);
+  const[hmData,setHmData]=useState([]);
+  const[hmLoading,setHmLoading]=useState(false);
+  const[filterInfo,setFilterInfo]=useState(null);
+  const[filters,setFilters]=useState({});
+
+  useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
+
+  useEffect(()=>{
+    if(!dim)return;
+    setLoading(true);
+    const p={group_by:dim.key,limit:30,...filters};
+    api.aggregate(p).then(r=>{setData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
+  },[dim,filters]);
+
+  useEffect(()=>{
+    if(!timeDim)return;
+    setLoading(true);
+    const p={group_by:timeDim.key,limit:500,...filters};
+    api.aggregate(p).then(r=>{setTimeData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
+  },[timeDim,filters]);
+
+  const loadHeatmap=()=>{
+    setHmLoading(true);
+    api.heatmap(filters).then(r=>{setHmData(r.cells||[]);setHmLoading(false)}).catch(()=>setHmLoading(false));
+  };
+
+  const drillToSearch=(label)=>{
+    if(!dim)return;
+    const f={};
+    // Map dimension key to filter parameter
+    if(dim.key==='dns_host')f.host=label;
+    else if(dim.key==='tags')f.tag=label;
+    else f[dim.key]=label;
+    onDrillToSearch(f);
+  };
+
+  return(<div>
+    {filterInfo&&<div className="stat-row">
+      <div><div className="stat-big">{(filterInfo.total_visits||0).toLocaleString()}</div><div className="stat-sm">Total Visits</div></div>
+      {filterInfo.time_range?.earliest&&<div>
+        <div className="stat-big" style={{fontSize:'.9rem'}}>{filterInfo.time_range.earliest?.split('T')[0]} &rarr; {filterInfo.time_range.latest?.split('T')[0]}</div>
+        <div className="stat-sm">Time Range</div>
+      </div>}
+    </div>}
+
+    <div className="card-h" style={{marginBottom:8}}>Choose a dimension to explore</div>
+    <div className="chips">
+      {DIMENSIONS.map(d=><button key={d.key} className={`chip ${dim?.key===d.key?'on':''}`} onClick={()=>{setDim(d);setTimeDim(null)}}>{d.label}</button>)}
+      <span style={{color:'var(--txt-2)',margin:'0 4px'}}>|</span>
+      {TIME_DIMS.map(td=><button key={td.key} className={`chip ${timeDim?.key===td.key?'on':''}`} onClick={()=>{setTimeDim(td);setDim(null)}}>{td.label}</button>)}
+      <button className={`chip ${hmData.length>0?'on':''}`} onClick={loadHeatmap}>Heatmap</button>
+    </div>
+
+    {/* Filters for explore */}
+    <div className="filters" style={{marginBottom:14}}>
+      <select className="f-sel" value={filters.browser||''} onChange={e=>setFilters({...filters,browser:e.target.value||undefined})}>
+        <option value="">All browsers</option>
+        {(filterInfo?.browser||[]).map(b=><option key={b} value={b}>{b}</option>)}
+      </select>
+      <select className="f-sel" value={filters.visit_source||''} onChange={e=>setFilters({...filters,visit_source:e.target.value||undefined})}>
+        <option value="">All sources</option>
+        {(filterInfo?.visit_source||[]).map(s=><option key={s} value={s}>{s}</option>)}
+      </select>
+      <select className="f-sel" value={filters.os_platform||''} onChange={e=>setFilters({...filters,os_platform:e.target.value||undefined})}>
+        <option value="">All OS</option>
+        {(filterInfo?.os_platform||[]).map(o=><option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+
+    {loading&&<div style={{padding:20}}><Spin/> Loading...</div>}
+
+    {/* Dimension chart */}
+    {dim&&data.length>0&&!loading&&(
+      <div className="card" style={{marginBottom:14}}>
+        <div className="card-h">{dim.label} (top {Math.min(data.length,30)})</div>
+        <BarChart items={data.map(r=>({label:r.label,count:r.count}))} color={dim.color} maxItems={30}
+          onClickLabel={drillToSearch}/>
+      </div>
+    )}
+
+    {/* Timeline chart */}
+    {timeDim&&timeData.length>0&&!loading&&(
+      <div className="card" style={{marginBottom:14}}>
+        <div className="card-h">Timeline ({timeDim.label})</div>
+        <TimelineChart buckets={timeData}/>
+      </div>
+    )}
+
+    {/* Heatmap */}
+    {hmData.length>0&&(
+      <div className="card" style={{marginBottom:14}}>
+        <div className="card-h">Activity Heatmap (day of week x hour of day)</div>
+        {hmLoading?<Spin/>:<Heatmap cells={hmData}/>}
+      </div>
+    )}
+
+    {!dim&&!timeDim&&hmData.length===0&&!loading&&(
+      <div className="explore-prompt">Select a dimension above to start exploring</div>
+    )}
+  </div>);
+}
+
+// ============================================================
+// INGEST VIEW
+// ============================================================
+function IngestView(){
+  const[path,setPath]=useState('');
+  const[loading,setLoading]=useState(false);
+  const[result,setResult]=useState(null);
+  const[log,setLog]=useState([]);
+  const[filterInfo,setFilterInfo]=useState(null);
+
+  useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
+
+  const go=async()=>{
+    if(!path.trim())return;
+    setLoading(true);setResult(null);setLog([{msg:'Starting pipeline...'}]);
+    try{
+      const r = await api.ingest(path.trim());
+      setResult(r);
+      setLog(prev=>[...prev,{msg:`Done: ${r.databases_found} DBs, ${r.total_new_rows||0} new rows`}]);
+      api.filters().then(setFilterInfo);
+    }catch(e){
+      setResult({error:e.message});
+      setLog(prev=>[...prev,{msg:`Error: ${e.message}`}]);
+    }
+    setLoading(false);
+  };
+
+  const reclassify=async()=>{
+    setLoading(true);setLog([{msg:'Re-classifying all visits...'}]);
+    try{
+      const r=await api.reingest();
+      setLog(prev=>[...prev,{msg:`Reclassified ${r.reclassified} visits`}]);
+    }catch(e){setLog(prev=>[...prev,{msg:`Error: ${e.message}`}])}
+    setLoading(false);
+  };
+
+  return(<div>
+    <div className="ing-panel">
+      <div className="card-h">Ingest Archive or Directory</div>
+      <p style={{color:'var(--txt-2)',fontSize:'.78rem',marginBottom:12}}>
+        Point to a <code>.7z</code> archive (passwords: infected/dangerous), <code>.tar.gz</code>, <code>.zip</code>,
+        or a directory. Nested archives are extracted recursively. Browser DBs detected by schema probing.
+      </p>
+      <div className="ing-row">
+        <input className="ing-in" placeholder="/path/to/evidence.7z or /path/to/extracted/" value={path} onChange={e=>setPath(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+        <button className="ing-btn" onClick={go} disabled={loading}>{loading?<><Spin/>Working...</>:'Ingest'}</button>
+        <button className="ing-btn sec" onClick={reclassify} disabled={loading}>Re-classify</button>
+      </div>
+      {log.length>0&&<div className="ing-log">{log.map((l,i)=><div key={i}>{l.msg}</div>)}</div>}
+    </div>
+
+    {result&&!result.error&&<div className="card" style={{marginBottom:14}}>
+      <div className="card-h">Found {result.databases_found} database(s)</div>
+      <table className="tbl"><thead><tr><th>Path</th><th>Browser</th><th>OS</th><th>User</th><th>Profile</th><th>Rows</th><th>Status</th></tr></thead><tbody>
+        {(result.ingested||[]).map((e,i)=><tr key={i}>
+          <td className="cell-u" style={{maxWidth:400}}>{e.path}</td>
+          <td><BrowserBadge b={e.browser}/></td>
+          <td>{e.os_platform&&<OsBadge o={e.os_platform}/>}</td>
+          <td className="cell-t">{e.user||'-'}</td>
+          <td className="cell-t">{e.profile||'-'}</td>
+          <td className="cell-t">{e.rows?.toLocaleString()}</td>
+          <td style={{color:e.status==='ingested'?'var(--green)':'var(--txt-2)'}}>{e.status}</td>
+        </tr>)}
+      </tbody></table>
+    </div>}
+
+    {result?.error&&<div className="card"><div className="card-h" style={{color:'var(--red)'}}>Error</div><p style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.78rem'}}>{result.error}</p></div>}
+
+    {filterInfo&&filterInfo.total_visits>0&&<div className="card">
+      <div className="card-h">Index Summary</div>
+      <div className="stat-row">
+        <div><div className="stat-big">{filterInfo.total_visits.toLocaleString()}</div><div className="stat-sm">Visits Indexed</div></div>
+        <div><div className="stat-big">{(filterInfo.browser||[]).length}</div><div className="stat-sm">Browsers</div></div>
+        <div><div className="stat-big">{(filterInfo.os_username||[]).length}</div><div className="stat-sm">Users</div></div>
+        <div><div className="stat-big">{(filterInfo.tags||[]).length}</div><div className="stat-sm">Tag Types</div></div>
+      </div>
+    </div>}
+  </div>);
+}
+
+// ============================================================
+// APP
+// ============================================================
+function App(){
+  const[view,setView]=useState('search');
+  const[searchFilters,setSearchFilters]=useState({});
+  const[filterInfo,setFilterInfo]=useState(null);
+
+  useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
+
+  const drillToSearch=(f)=>{setSearchFilters(f);setView('search')};
+
+  return(<div className="shell">
+    <header className="hdr">
+      <div className="hdr-logo">forensic<span>/</span>history</div>
+      <div className="hdr-meta">{filterInfo?`${(filterInfo.total_visits||0).toLocaleString()} visits indexed`:''}</div>
+    </header>
+    <div className="tabs">
+      <button className={`tab ${view==='search'?'on':''}`} onClick={()=>setView('search')}>Search</button>
+      <button className={`tab ${view==='explore'?'on':''}`} onClick={()=>setView('explore')}>Explore</button>
+      <button className={`tab ${view==='ingest'?'on':''}`} onClick={()=>setView('ingest')}>Ingest</button>
+    </div>
+    {view==='search'&&<SearchView initialFilters={searchFilters}/>}
+    {view==='explore'&&<ExploreView onDrillToSearch={drillToSearch}/>}
+    {view==='ingest'&&<IngestView/>}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
