@@ -564,6 +564,143 @@ def run_tests():
         finally:
             srv.BROWSE_ROOTS = old_roots
 
+        # Re-seed for search mode and exclusion tests
+        seed_db(db_path)
+
+        # ---------------------------------------------------------------
+        # Search mode: contains (substring match)
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?q=pastebin&mode=contains")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            if any("pastebin" in row["dns_host"] for row in data["results"]):
+                print("[PASS] GET /api/search?mode=contains — substring match")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=contains — no pastebin in results")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=contains — status={r.status_code}, total={data.get('total')}")
+            failed += 1
+
+        # Contains partial match (middle of URL)
+        r = client.get("/api/search?q=raw%2Fabc&mode=contains")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            print("[PASS] GET /api/search?mode=contains — partial path match")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=contains partial — total={data.get('total')}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Search mode: regex
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?q=pastebin%5C.com&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            if any("pastebin.com" in row["dns_host"] for row in data["results"]):
+                print("[PASS] GET /api/search?mode=regex — regex match")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=regex — no pastebin in results")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=regex — status={r.status_code}, total={data.get('total')}")
+            failed += 1
+
+        # Regex with anchored pattern
+        r = client.get("/api/search?q=drive%5C.google&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 1:
+            print("[PASS] GET /api/search?mode=regex — anchored regex finds 1")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=regex anchored — total={data.get('total')}")
+            failed += 1
+
+        # Regex with OR alternation
+        r = client.get("/api/search?q=pastebin%7Cdrive&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 2:
+            print("[PASS] GET /api/search?mode=regex — alternation matches 2+")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=regex alternation — total={data.get('total')}")
+            failed += 1
+
+        # Invalid regex returns 400
+        r = client.get("/api/search?q=%5B%5Bbad&mode=regex")
+        if r.status_code == 400:
+            data = r.get_json()
+            if "error" in data:
+                print("[PASS] GET /api/search?mode=regex — 400 on invalid regex")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=regex bad — expected error in response")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=regex bad — expected 400, got {r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Domain exclusion filter
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?exclude_host=pastebin.com")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 2:
+            hosts = {row["dns_host"] for row in data["results"]}
+            if "pastebin.com" not in hosts:
+                print("[PASS] GET /api/search?exclude_host — excludes pastebin.com")
+                passed += 1
+            else:
+                print(f"[FAIL] exclude_host — pastebin.com still in results: {hosts}")
+                failed += 1
+        else:
+            print(f"[FAIL] exclude_host — total={data.get('total')}, expected 2")
+            failed += 1
+
+        # Multiple domain exclusion
+        r = client.get("/api/search?exclude_host=pastebin.com,drive.google.com")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 1:
+            if data["results"][0]["dns_host"] == "www.google.com":
+                print("[PASS] GET /api/search?exclude_host — multi-domain exclusion")
+                passed += 1
+            else:
+                print(f"[FAIL] exclude_host multi — wrong remaining host: {data['results'][0]['dns_host']}")
+                failed += 1
+        else:
+            print(f"[FAIL] exclude_host multi — total={data.get('total')}, expected 1")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Browse API returns mtime and cwd
+        # ---------------------------------------------------------------
+        r = client.get("/api/browse?path=/tmp")
+        data = r.get_json()
+        if r.status_code == 200 and "cwd" in data:
+            print("[PASS] GET /api/browse — response includes cwd")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/browse cwd — {'cwd' not in (data or {})} status={r.status_code}")
+            failed += 1
+
+        # Check mtime on entries (if any files in /tmp)
+        r = client.get("/api/browse?path=/tmp")
+        data = r.get_json()
+        if r.status_code == 200:
+            has_mtime = all("mtime" in e for e in data.get("entries", []) if not e.get("is_dir"))
+            if has_mtime or len(data.get("entries", [])) == 0:
+                print("[PASS] GET /api/browse — entries include mtime")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/browse mtime — missing mtime in entries")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/browse mtime — status={r.status_code}")
+            failed += 1
+
         # Re-seed for final state
         seed_db(db_path)
 
