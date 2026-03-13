@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import json
 import logging
@@ -29,7 +30,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, g, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
 from .pipeline.carve import carve_deleted_records
 from .pipeline.classify import classify_batch
@@ -394,6 +395,96 @@ def api_search():
     return jsonify({"total": total, "limit": limit, "offset": offset, "results": rows})
 
 
+CSV_COLUMNS = [
+    "id", "visit_time_utc", "full_url", "title", "dns_host", "url_path",
+    "query_string_decoded", "visit_source", "visit_source_confidence",
+    "transition_type", "transition_qualifiers", "from_visit_url",
+    "visit_duration_ms", "browser", "browser_engine", "browser_profile",
+    "os_platform", "os_username", "endpoint_name", "source_db_path",
+    "provenance_chain", "tags", "unfurl",
+]
+
+
+@app.route("/api/export")
+def api_export():
+    """Export search results as CSV. Accepts same params as /api/search."""
+    db = _get_db()
+    q = request.args.get("q", "").strip()
+    mode = request.args.get("mode", "fts")
+    if mode not in ("fts", "contains", "regex"):
+        mode = "fts"
+    sort = request.args.get("sort", "rank" if q and mode == "fts" else "time")
+    sort_dir = request.args.get("sort_dir", "desc").upper()
+    if sort_dir not in ("ASC", "DESC"):
+        sort_dir = "DESC"
+    f = _get_filters()
+
+    if mode == "regex" and q:
+        try:
+            re.compile(q)
+        except re.error as exc:
+            return jsonify({"error": f"Invalid regex: {exc}"}), 400
+
+    SORT_MAP = {
+        "time": f"v.visit_time_utc {sort_dir}",
+        "host": f"v.dns_host {sort_dir}",
+        "title": f"v.title {sort_dir}",
+        "browser": f"v.browser {sort_dir}",
+        "url": f"v.full_url {sort_dir}",
+        "url_length": f"LENGTH(v.full_url) {sort_dir}",
+        "source": f"v.visit_source {sort_dir}",
+        "transition": f"v.transition_type {sort_dir}",
+        "duration": f"v.visit_duration_ms {sort_dir}",
+        "file_source": f"v.source_db_path {sort_dir}",
+    }
+
+    use_fts = q and mode == "fts"
+    if use_fts:
+        w, p = _build_where(f, fts_q=q, search_mode="fts")
+        order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
+        sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
+               f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
+               f"WHERE {w} ORDER BY {order}")
+    else:
+        w, p = _build_where(f, fts_q=q if q else "", search_mode=mode)
+        order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
+        sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
+               f"WHERE {w} ORDER BY {order}")
+
+    # Use a dedicated connection for streaming (app context may close before
+    # the generator finishes)
+    db_path = g.db_path
+
+    def generate():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(CSV_COLUMNS)
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+            for row in conn.execute(sql, p):
+                vals = []
+                for c in CSV_COLUMNS:
+                    v = row[c] if c in row.keys() else ""
+                    vals.append(v if v is not None else "")
+                writer.writerow(vals)
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+        finally:
+            conn.close()
+
+    return Response(
+        generate(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=export.csv"},
+    )
+
+
 @app.route("/api/visit/<int:visit_id>")
 def api_visit(visit_id: int):
     """Single visit detail."""
@@ -422,7 +513,19 @@ def api_aggregate():
     limit = min(int(request.args.get("limit", 20)), 200)
     sort = request.args.get("sort", "desc")
     f = _get_filters()
-    w, p = _build_where(f)
+    q = request.args.get("q", "").strip()
+    search_mode = request.args.get("mode", "fts")
+    if search_mode not in ("fts", "contains", "regex"):
+        search_mode = "fts"
+    use_fts = q and search_mode == "fts"
+    if q:
+        w, p = _build_where(f, fts_q=q, search_mode=search_mode)
+    else:
+        w, p = _build_where(f)
+
+    # FTS search requires joining the FTS table
+    fts_join = (f"{TABLE_FTS} fts JOIN {TABLE_VISITS} v ON v.id = fts.rowid"
+                if use_fts else f"{TABLE_VISITS} v")
 
     sort_dir = "DESC" if sort == "desc" else "ASC"
 
@@ -443,7 +546,7 @@ def api_aggregate():
         else:
             select = "j.value AS label, COUNT(*) AS count"
 
-        sql = (f"SELECT {select} FROM {TABLE_VISITS} v, json_each(v.tags) AS j "
+        sql = (f"SELECT {select} FROM {fts_join}, json_each(v.tags) AS j "
                f"WHERE {w} GROUP BY j.value ORDER BY count {sort_dir} LIMIT ?")
     elif group_by in time_groups:
         pat = time_groups[group_by]
@@ -454,7 +557,7 @@ def api_aggregate():
         else:
             select = f"strftime('{pat}', v.visit_time_utc) AS label, COUNT(*) AS count"
 
-        sql = (f"SELECT {select} FROM {TABLE_VISITS} v "
+        sql = (f"SELECT {select} FROM {fts_join} "
                f"WHERE {w} AND v.visit_time_utc != '' "
                f"GROUP BY label ORDER BY label ASC LIMIT ?")
     else:
@@ -462,7 +565,7 @@ def api_aggregate():
         col = f"v.{group_by}" if group_by in (
             "dns_host", "browser", "os_platform", "os_username",
             "browser_profile", "endpoint_name", "visit_source",
-            "transition_type", "browser_engine",
+            "transition_type", "browser_engine", "title",
         ) else "v.dns_host"
 
         if metric == "unique_urls":
@@ -472,7 +575,7 @@ def api_aggregate():
         else:
             select = f"{col} AS label, COUNT(*) AS count"
 
-        sql = (f"SELECT {select} FROM {TABLE_VISITS} v "
+        sql = (f"SELECT {select} FROM {fts_join} "
                f"WHERE {w} GROUP BY label ORDER BY count {sort_dir} LIMIT ?")
 
     rows = [{"label": r["label"], "count": r["count"]}
@@ -515,12 +618,19 @@ def api_heatmap():
     """Day-of-week × hour-of-day activity heatmap."""
     db = _get_db()
     f = _get_filters()
-    w, p = _build_where(f)
+    q = request.args.get("q", "").strip()
+    use_fts = bool(q)
+    if q:
+        w, p = _build_where(f, fts_q=q, search_mode="fts")
+    else:
+        w, p = _build_where(f)
+    fts_join = (f"{TABLE_FTS} fts JOIN {TABLE_VISITS} v ON v.id = fts.rowid"
+                if use_fts else f"{TABLE_VISITS} v")
     rows = db.execute(
-        f"SELECT CAST(strftime('%w', visit_time_utc) AS INT) AS dow, "
-        f"CAST(strftime('%H', visit_time_utc) AS INT) AS hour, "
-        f"COUNT(*) AS count FROM {TABLE_VISITS} v "
-        f"WHERE {w} AND visit_time_utc != '' GROUP BY dow, hour", p
+        f"SELECT CAST(strftime('%w', v.visit_time_utc) AS INT) AS dow, "
+        f"CAST(strftime('%H', v.visit_time_utc) AS INT) AS hour, "
+        f"COUNT(*) AS count FROM {fts_join} "
+        f"WHERE {w} AND v.visit_time_utc != '' GROUP BY dow, hour", p
     ).fetchall()
     return jsonify({"cells": [dict(r) for r in rows]})
 

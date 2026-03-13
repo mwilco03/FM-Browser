@@ -570,6 +570,18 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const hasFilters=host||browser||visitSource||osPlatform||tag||transType||startDate||endDate||excludeHosts.length;
   const total=results?.total||0, rows=allRows;
 
+  const exportCSV=()=>{
+    const p={sort:sortCol,sort_dir:sortDir};
+    if(dq){p.q=dq;p.mode=searchMode}
+    if(host)p.host=host;if(browser)p.browser=browser;
+    if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
+    if(tag)p.tag=tag;if(transType)p.transition_type=transType;
+    if(startDate)p.start=startDate+'T00:00:00Z';
+    if(endDate)p.end=endDate+'T23:59:59Z';
+    if(excludeHosts.length)p.exclude_host=excludeHosts.join(',');
+    window.open('/api/export?'+new URLSearchParams(p),'_blank');
+  };
+
   // Column definitions for sortable headers
   const COL_NUM = 10;
 
@@ -629,6 +641,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
       {hasFilters&&<button className="f-clear" onClick={clearFilters}>Clear all</button>}
       {loading&&<Spin/>}
       <span className="f-meta"><em>{total.toLocaleString()}</em> results</span>
+      {total>0&&<button className="ing-btn sec" onClick={exportCSV} style={{fontSize:'.68rem',padding:'4px 10px',marginLeft:4}} title="Export all matching results as CSV">Export CSV</button>}
     </div>
 
     {rows.length===0&&!loading?<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>:(
@@ -745,6 +758,7 @@ const DIMENSIONS = [
   {key:'visit_source',label:'Visit Source',color:'var(--blue)'},
   {key:'transition_type',label:'Transitions',color:'var(--green)'},
   {key:'tags',label:'Tags',color:'var(--red)'},
+  {key:'title',label:'Titles',color:'var(--txt-1)'},
 ];
 const TIME_DIMS = [
   {key:'time_hour',label:'Hour'},{key:'time_day',label:'Day'},
@@ -761,6 +775,8 @@ function ExploreView({onDrillToSearch}){
   const[hmLoading,setHmLoading]=useState(false);
   const[filterInfo,setFilterInfo]=useState(null);
   const[filters,setFilters]=useState({});
+  const[exploreQ,setExploreQ]=useState('');
+  const dExploreQ=useDebounce(exploreQ,400);
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
 
@@ -768,19 +784,23 @@ function ExploreView({onDrillToSearch}){
     if(!dim)return;
     setLoading(true);
     const p={group_by:dim.key,limit:30,...filters};
+    if(dExploreQ)p.q=dExploreQ;
     api.aggregate(p).then(r=>{setData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
-  },[dim,filters]);
+  },[dim,filters,dExploreQ]);
 
   useEffect(()=>{
     if(!timeDim)return;
     setLoading(true);
     const p={group_by:timeDim.key,limit:500,...filters};
+    if(dExploreQ)p.q=dExploreQ;
     api.aggregate(p).then(r=>{setTimeData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
-  },[timeDim,filters]);
+  },[timeDim,filters,dExploreQ]);
 
   const loadHeatmap=()=>{
     setHmLoading(true);
-    api.heatmap(filters).then(r=>{setHmData(r.cells||[]);setHmLoading(false)}).catch(()=>setHmLoading(false));
+    const hp={...filters};
+    if(dExploreQ)hp.q=dExploreQ;
+    api.heatmap(hp).then(r=>{setHmData(r.cells||[]);setHmLoading(false)}).catch(()=>setHmLoading(false));
   };
 
   const drillToSearch=(label)=>{
@@ -801,6 +821,9 @@ function ExploreView({onDrillToSearch}){
       </div>}
     </div>}
 
+    <div style={{marginBottom:12}}>
+      <input className="search-in" placeholder="Filter aggregations by keyword (FTS5)..." value={exploreQ} onChange={e=>setExploreQ(e.target.value)} style={{width:'100%',maxWidth:500}}/>
+    </div>
     <div className="card-h" style={{marginBottom:8}}>Choose a dimension to explore</div>
     <div className="chips">
       {DIMENSIONS.map(d=><button key={d.key} className={`chip ${dim?.key===d.key?'on':''}`} onClick={()=>{setDim(d);setTimeDim(null)}}>{d.label}</button>)}
@@ -1079,9 +1102,9 @@ function App(){
       <button className={`tab ${view==='explore'?'on':''}`} onClick={()=>setView('explore')}>Explore</button>
       <button className={`tab ${view==='ingest'?'on':''}`} onClick={()=>setView('ingest')}>Ingest</button>
     </div>
-    {view==='search'&&<SearchView initialFilters={searchFilters}/>}
-    {view==='explore'&&<ExploreView onDrillToSearch={drillToSearch}/>}
-    {view==='ingest'&&<IngestView/>}
+    <div style={{display:view==='search'?'block':'none'}}><SearchView initialFilters={searchFilters}/></div>
+    <div style={{display:view==='explore'?'block':'none'}}><ExploreView onDrillToSearch={drillToSearch}/></div>
+    <div style={{display:view==='ingest'?'block':'none'}}><IngestView/></div>
   </div>);
 }
 

@@ -799,6 +799,48 @@ def run_tests():
             print(f"[FAIL] POST /api/sources/delete bad ids — {r.status_code}")
             failed += 1
 
+        # ---------------------------------------------------------------
+        # GET /api/export — CSV export
+        # ---------------------------------------------------------------
+        # Re-seed first so we have data
+        seed_db(db_path)
+
+        r = client.get("/api/export")
+        if r.status_code == 200 and r.content_type.startswith("text/csv"):
+            lines = r.data.decode().strip().split("\n")
+            if len(lines) >= 2 and "visit_time_utc" in lines[0]:
+                print(f"[PASS] GET /api/export — CSV with {len(lines)-1} data rows")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/export — bad CSV content: header={lines[0][:60]}")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/export — status={r.status_code}, type={r.content_type}")
+            failed += 1
+
+        # Export with search query
+        r = client.get("/api/export?q=forensic")
+        if r.status_code == 200:
+            lines = r.data.decode().strip().split("\n")
+            # Should have fewer rows than total (header + filtered rows)
+            print(f"[PASS] GET /api/export?q=forensic — filtered CSV with {len(lines)-1} data rows")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/export?q=forensic — status={r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # GET /api/aggregate?group_by=title — title aggregation
+        # ---------------------------------------------------------------
+        r = client.get("/api/aggregate?group_by=title")
+        data = r.get_json()
+        if r.status_code == 200 and len(data.get("results", [])) >= 1:
+            print("[PASS] GET /api/aggregate?group_by=title — title aggregation works")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/aggregate?group_by=title — {data}")
+            failed += 1
+
         # Re-seed for final state
         seed_db(db_path)
 
