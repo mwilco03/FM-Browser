@@ -181,6 +181,18 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .fp-size{color:var(--txt-2);font-size:.68rem;min-width:60px;text-align:right}
 .fp-actions{display:flex;gap:8px;margin-top:12px;justify-content:flex-end}
 
+/* Source Manager */
+.src-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--r);border:1px solid transparent;transition:background .15s}
+.src-row:hover{background:var(--bg-2)}
+.src-row.selected{background:var(--accent-dim);border-color:var(--accent)}
+.src-check{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.src-info{flex:1;min-width:0}
+.src-path{font-family:var(--mono);font-size:.75rem;color:var(--txt-0);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.src-meta{font-size:.68rem;color:var(--txt-2);margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
+.src-ct{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);min-width:70px;text-align:right}
+.src-actions{display:flex;gap:8px;align-items:center;margin-top:10px}
+.src-sel-info{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);flex:1}
+
 /* Stats */
 .stat-row{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:18px}
 .stat-big{font-family:var(--mono);font-size:1.8rem;font-weight:700;color:var(--txt-0);line-height:1}
@@ -220,6 +232,8 @@ const api = {
   rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
   clear: () => fetch('/api/clear',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
   browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(r=>r.json()),
+  sources: () => fetch('/api/sources').then(r=>r.json()),
+  deleteSources: ids => fetch('/api/sources/delete',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({ids})}).then(r=>r.json()),
 };
 
 function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
@@ -844,6 +858,80 @@ function ExploreView({onDrillToSearch}){
 // ============================================================
 // INGEST VIEW
 // ============================================================
+function SourceManager({onChanged}){
+  const[sources,setSources]=useState([]);
+  const[selected,setSelected]=useState(new Set());
+  const[loading,setLoading]=useState(true);
+  const[deleting,setDeleting]=useState(false);
+
+  const load=useCallback(()=>{
+    setLoading(true);
+    api.sources().then(r=>{setSources(r.sources||[]);setLoading(false)}).catch(()=>setLoading(false));
+  },[]);
+
+  useEffect(()=>{load()},[load]);
+
+  const toggle=(id)=>setSelected(prev=>{const s=new Set(prev);s.has(id)?s.delete(id):s.add(id);return s});
+  const selectAll=()=>{
+    if(selected.size===sources.length)setSelected(new Set());
+    else setSelected(new Set(sources.map(s=>s.id)));
+  };
+
+  const deleteSelected=async()=>{
+    if(!selected.size)return;
+    const names=sources.filter(s=>selected.has(s.id)).map(s=>s.source_db.split('/').pop()||s.source_db);
+    if(!confirm(`Remove ${selected.size} source(s) and all their visits?\n\n${names.join('\n')}`))return;
+    setDeleting(true);
+    try{
+      const r=await api.deleteSources([...selected]);
+      setSelected(new Set());
+      load();
+      if(onChanged)onChanged(r);
+    }catch(e){alert('Delete failed: '+e.message)}
+    setDeleting(false);
+  };
+
+  if(loading)return <div className="ing-panel"><div className="card-h">Ingested Sources</div><Spin/> Loading...</div>;
+  if(!sources.length)return <div className="ing-panel"><div className="card-h">Ingested Sources</div><p style={{color:'var(--txt-2)',fontSize:'.78rem'}}>No sources ingested yet.</p></div>;
+
+  const totalVisits=sources.reduce((a,s)=>a+s.live_rows,0);
+  const selVisits=sources.filter(s=>selected.has(s.id)).reduce((a,s)=>a+s.live_rows,0);
+
+  return(<div className="ing-panel">
+    <div className="card-h">Ingested Sources ({sources.length})</div>
+    <div className="src-actions" style={{marginBottom:8}}>
+      <label style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',fontSize:'.72rem',fontFamily:'var(--mono)',color:'var(--txt-2)'}}>
+        <input type="checkbox" className="src-check" checked={selected.size===sources.length&&sources.length>0} onChange={selectAll}/>
+        Select all
+      </label>
+      <span className="src-sel-info">
+        {selected.size>0?`${selected.size} selected \u00B7 ${selVisits.toLocaleString()} visits`:`${totalVisits.toLocaleString()} total visits`}
+      </span>
+      {selected.size>0&&<button className="ing-btn danger" onClick={deleteSelected} disabled={deleting} style={{fontSize:'.72rem',padding:'5px 14px'}}>
+        {deleting?<><Spin/>Removing...</>:`Remove ${selected.size} source(s)`}
+      </button>}
+    </div>
+    <div style={{maxHeight:320,overflowY:'auto'}}>
+      {sources.map(s=>(
+        <div key={s.id} className={`src-row${selected.has(s.id)?' selected':''}`} onClick={()=>toggle(s.id)}>
+          <input type="checkbox" className="src-check" checked={selected.has(s.id)} onChange={()=>toggle(s.id)} onClick={e=>e.stopPropagation()}/>
+          <div className="src-info">
+            <div className="src-path" title={s.source_db}>{s.source_db}</div>
+            <div className="src-meta">
+              <span><BrowserBadge b={s.browser}/></span>
+              {s.os_platform&&<span><OsBadge o={s.os_platform}/></span>}
+              {s.os_username&&<span>{s.os_username}</span>}
+              {s.browser_profile&&<span>{s.browser_profile}</span>}
+              <span style={{color:'var(--txt-2)'}}>ingested {s.ingested_at}</span>
+            </div>
+          </div>
+          <div className="src-ct">{s.live_rows.toLocaleString()} visits</div>
+        </div>
+      ))}
+    </div>
+  </div>);
+}
+
 function IngestView(){
   const[path,setPath]=useState('');
   const[loading,setLoading]=useState(false);
@@ -853,7 +941,9 @@ function IngestView(){
   const[showPicker,setShowPicker]=useState(false);
   const[clearFirst,setClearFirst]=useState(false);
   const[token,setTokenLocal]=useState(getToken());
+  const[srcRefresh,setSrcRefresh]=useState(0);
   const handleTokenChange=(e)=>{setTokenLocal(e.target.value);setToken(e.target.value)};
+  const refreshAll=()=>{api.filters().then(setFilterInfo).catch(()=>{});setSrcRefresh(k=>k+1)};
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
 
@@ -865,7 +955,7 @@ function IngestView(){
       const r = await api.ingest(path.trim(), clearFirst);
       setResult(r);
       setLog(prev=>[...prev,{msg:`Done: ${r.databases_found} DBs, ${r.total_new_rows||0} new rows`}]);
-      api.filters().then(setFilterInfo);
+      refreshAll();
     }catch(e){
       setResult({error:e.message});
       setLog(prev=>[...prev,{msg:`Error: ${e.message}`}]);
@@ -879,7 +969,7 @@ function IngestView(){
     try{
       await api.clear();
       setLog(prev=>[...prev,{msg:'All data cleared'}]);
-      api.filters().then(setFilterInfo);
+      refreshAll();
     }catch(e){setLog(prev=>[...prev,{msg:`Error: ${e.message}`}])}
     setLoading(false);
   };
@@ -944,6 +1034,8 @@ function IngestView(){
     </div>}
 
     {result?.error&&<div className="card"><div className="card-h" style={{color:'var(--red)'}}>Error</div><p style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.78rem'}}>{result.error}</p></div>}
+
+    <SourceManager key={srcRefresh} onChanged={()=>refreshAll()}/>
 
     {filterInfo&&filterInfo.total_visits>0&&<div className="card">
       <div className="card-h">Index Summary</div>

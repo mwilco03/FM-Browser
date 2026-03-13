@@ -569,6 +569,60 @@ def api_browse():
     })
 
 
+@app.route("/api/sources")
+def api_sources():
+    """List all ingested sources with per-source visit counts."""
+    db = _get_db()
+    rows = db.execute(
+        f"SELECT il.id, il.source_db, il.browser, il.os_platform, il.os_username, "
+        f"il.browser_profile, il.endpoint_name, il.row_count AS ingested_rows, il.ingested_at, "
+        f"COUNT(v.id) AS live_rows "
+        f"FROM ingest_log il "
+        f"LEFT JOIN {TABLE_VISITS} v ON v.source_db_path = il.source_db "
+        f"GROUP BY il.id ORDER BY il.ingested_at DESC"
+    ).fetchall()
+    return jsonify({"sources": [dict(r) for r in rows]})
+
+
+@app.route("/api/sources/delete", methods=["POST"])
+@require_token
+def api_sources_delete():
+    """Delete visits from selected sources by ingest_log IDs."""
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids", [])
+    if not ids or not isinstance(ids, list):
+        return jsonify({"error": "ids array required"}), 400
+
+    db = _get_db()
+    # Look up source_db keys for the given ingest_log IDs
+    placeholders = ",".join("?" * len(ids))
+    source_rows = db.execute(
+        f"SELECT id, source_db FROM ingest_log WHERE id IN ({placeholders})",
+        ids
+    ).fetchall()
+    if not source_rows:
+        return jsonify({"error": "no matching sources found"}), 404
+
+    deleted_visits = 0
+    deleted_sources = []
+    for row in source_rows:
+        src_id, src_db = row["id"], row["source_db"]
+        cur = db.execute(
+            f"DELETE FROM {TABLE_VISITS} WHERE source_db_path = ?", (src_db,)
+        )
+        deleted_visits += cur.rowcount
+        db.execute("DELETE FROM ingest_log WHERE id = ?", (src_id,))
+        deleted_sources.append(src_db)
+
+    db.commit()
+    rebuild_fts(g.db_path)
+    return jsonify({
+        "status": "ok",
+        "deleted_visits": deleted_visits,
+        "deleted_sources": deleted_sources,
+    })
+
+
 @app.route("/api/clear", methods=["POST"])
 @require_token
 def api_clear():

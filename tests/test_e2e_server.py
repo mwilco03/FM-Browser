@@ -108,11 +108,28 @@ def seed_db(db_path):
     placeholders = ", ".join(["?"] * len(COLS))
     col_names = ", ".join(COLS)
     with sqlite3.connect(db_path) as conn:
+        # Track unique source_db_path values for ingest_log
+        seen_sources = {}
         for visit in SAMPLE_VISITS:
             values = [visit[c] for c in COLS]
             conn.execute(
                 f"INSERT INTO {TABLE_VISITS} ({col_names}) VALUES ({placeholders})",
                 values,
+            )
+            src = visit["source_db_path"]
+            if src not in seen_sources:
+                seen_sources[src] = {"browser": visit["browser"], "os_platform": visit["os_platform"],
+                                     "os_username": visit["os_username"], "browser_profile": visit["browser_profile"],
+                                     "endpoint_name": visit["endpoint_name"], "count": 0}
+            seen_sources[src]["count"] += 1
+
+        # Seed ingest_log so /api/sources works
+        for src, info in seen_sources.items():
+            conn.execute(
+                "INSERT INTO ingest_log (source_db, browser, os_platform, os_username, browser_profile, endpoint_name, row_count) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (src, info["browser"], info["os_platform"], info["os_username"],
+                 info["browser_profile"], info["endpoint_name"], info["count"]),
             )
         conn.commit()
 
@@ -699,6 +716,87 @@ def run_tests():
                 failed += 1
         else:
             print(f"[FAIL] GET /api/browse mtime — status={r.status_code}")
+            failed += 1
+
+        # Re-seed for source manager tests
+        seed_db(db_path)
+
+        # ---------------------------------------------------------------
+        # GET /api/sources — list ingested sources
+        # ---------------------------------------------------------------
+        r = client.get("/api/sources")
+        data = r.get_json()
+        if r.status_code == 200 and len(data.get("sources", [])) >= 1:
+            src = data["sources"][0]
+            if all(k in src for k in ("id", "source_db", "browser", "live_rows", "ingested_at")):
+                print("[PASS] GET /api/sources — lists ingested sources with fields")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/sources — missing fields: {src.keys()}")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/sources — status={r.status_code}, sources={len(data.get('sources', []))}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # POST /api/sources/delete — remove specific sources
+        # ---------------------------------------------------------------
+        # Get the source IDs first
+        r = client.get("/api/sources")
+        sources = r.get_json().get("sources", [])
+        if len(sources) >= 1:
+            # Delete one source
+            del_id = sources[0]["id"]
+            del_db = sources[0]["source_db"]
+            initial_visits = sources[0]["live_rows"]
+            r = client.post("/api/sources/delete",
+                            data=json.dumps({"ids": [del_id]}),
+                            content_type="application/json")
+            data = r.get_json()
+            if r.status_code == 200 and data.get("status") == "ok":
+                if del_db in data.get("deleted_sources", []):
+                    print("[PASS] POST /api/sources/delete — removed source")
+                    passed += 1
+                else:
+                    print(f"[FAIL] POST /api/sources/delete — source not in deleted list")
+                    failed += 1
+            else:
+                print(f"[FAIL] POST /api/sources/delete — {data}")
+                failed += 1
+
+            # Verify source is gone
+            r = client.get("/api/sources")
+            remaining_ids = {s["id"] for s in r.get_json().get("sources", [])}
+            if del_id not in remaining_ids:
+                print("[PASS] POST /api/sources/delete — verified source removed")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/sources/delete — source still present")
+                failed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete — no sources to test with")
+            failed += 2
+
+        # POST /api/sources/delete — bad request (no ids)
+        r = client.post("/api/sources/delete",
+                        data=json.dumps({}),
+                        content_type="application/json")
+        if r.status_code == 400:
+            print("[PASS] POST /api/sources/delete — 400 on missing ids")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete empty — {r.status_code}")
+            failed += 1
+
+        # POST /api/sources/delete — nonexistent IDs
+        r = client.post("/api/sources/delete",
+                        data=json.dumps({"ids": [99999]}),
+                        content_type="application/json")
+        if r.status_code == 404:
+            print("[PASS] POST /api/sources/delete — 404 on bad IDs")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete bad ids — {r.status_code}")
             failed += 1
 
         # Re-seed for final state
