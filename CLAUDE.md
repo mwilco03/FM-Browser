@@ -55,13 +55,18 @@ python -m history_search.server --port 8888
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/search` | Full-text search with filters and pagination |
+| GET | `/api/export` | Export matching results as streaming CSV (same params as search) |
 | GET | `/api/visit/{id}` | Single visit detail |
-| GET | `/api/aggregate` | Dynamic aggregation (group_by any dimension) |
+| GET | `/api/aggregate` | Dynamic aggregation (group_by any dimension, supports q= text search) |
 | GET | `/api/filters` | Available filter values for dropdowns |
-| GET | `/api/heatmap` | Day-of-week x hour activity heatmap |
+| GET | `/api/heatmap` | Day-of-week x hour activity heatmap (supports q= text search) |
+| GET | `/api/sources` | List all ingested sources with live visit counts |
+| GET | `/api/browse` | Browse server filesystem for file picker |
+| POST | `/api/sources/delete` | Remove selected sources and their visits by ingest_log IDs |
 | POST | `/api/ingest` | Run full pipeline on archive/directory |
 | POST | `/api/reingest` | Re-classify all visits |
 | POST | `/api/rebuild-fts` | Rebuild FTS5 index |
+| POST | `/api/clear` | Wipe all visit data and ingest log |
 
 ## Conventions
 
