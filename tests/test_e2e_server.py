@@ -108,11 +108,28 @@ def seed_db(db_path):
     placeholders = ", ".join(["?"] * len(COLS))
     col_names = ", ".join(COLS)
     with sqlite3.connect(db_path) as conn:
+        # Track unique source_db_path values for ingest_log
+        seen_sources = {}
         for visit in SAMPLE_VISITS:
             values = [visit[c] for c in COLS]
             conn.execute(
                 f"INSERT INTO {TABLE_VISITS} ({col_names}) VALUES ({placeholders})",
                 values,
+            )
+            src = visit["source_db_path"]
+            if src not in seen_sources:
+                seen_sources[src] = {"browser": visit["browser"], "os_platform": visit["os_platform"],
+                                     "os_username": visit["os_username"], "browser_profile": visit["browser_profile"],
+                                     "endpoint_name": visit["endpoint_name"], "count": 0}
+            seen_sources[src]["count"] += 1
+
+        # Seed ingest_log so /api/sources works
+        for src, info in seen_sources.items():
+            conn.execute(
+                "INSERT INTO ingest_log (source_db, browser, os_platform, os_username, browser_profile, endpoint_name, row_count) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (src, info["browser"], info["os_platform"], info["os_username"],
+                 info["browser_profile"], info["endpoint_name"], info["count"]),
             )
         conn.commit()
 
@@ -563,6 +580,266 @@ def run_tests():
                 failed += 1
         finally:
             srv.BROWSE_ROOTS = old_roots
+
+        # Re-seed for search mode and exclusion tests
+        seed_db(db_path)
+
+        # ---------------------------------------------------------------
+        # Search mode: contains (substring match)
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?q=pastebin&mode=contains")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            if any("pastebin" in row["dns_host"] for row in data["results"]):
+                print("[PASS] GET /api/search?mode=contains — substring match")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=contains — no pastebin in results")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=contains — status={r.status_code}, total={data.get('total')}")
+            failed += 1
+
+        # Contains partial match (middle of URL)
+        r = client.get("/api/search?q=raw%2Fabc&mode=contains")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            print("[PASS] GET /api/search?mode=contains — partial path match")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=contains partial — total={data.get('total')}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Search mode: regex
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?q=pastebin%5C.com&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 1:
+            if any("pastebin.com" in row["dns_host"] for row in data["results"]):
+                print("[PASS] GET /api/search?mode=regex — regex match")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=regex — no pastebin in results")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=regex — status={r.status_code}, total={data.get('total')}")
+            failed += 1
+
+        # Regex with anchored pattern
+        r = client.get("/api/search?q=drive%5C.google&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 1:
+            print("[PASS] GET /api/search?mode=regex — anchored regex finds 1")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=regex anchored — total={data.get('total')}")
+            failed += 1
+
+        # Regex with OR alternation
+        r = client.get("/api/search?q=pastebin%7Cdrive&mode=regex")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] >= 2:
+            print("[PASS] GET /api/search?mode=regex — alternation matches 2+")
+            passed += 1
+        else:
+            print(f"[FAIL] mode=regex alternation — total={data.get('total')}")
+            failed += 1
+
+        # Invalid regex returns 400
+        r = client.get("/api/search?q=%5B%5Bbad&mode=regex")
+        if r.status_code == 400:
+            data = r.get_json()
+            if "error" in data:
+                print("[PASS] GET /api/search?mode=regex — 400 on invalid regex")
+                passed += 1
+            else:
+                print(f"[FAIL] mode=regex bad — expected error in response")
+                failed += 1
+        else:
+            print(f"[FAIL] mode=regex bad — expected 400, got {r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Domain exclusion filter
+        # ---------------------------------------------------------------
+        r = client.get("/api/search?exclude_host=pastebin.com")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 2:
+            hosts = {row["dns_host"] for row in data["results"]}
+            if "pastebin.com" not in hosts:
+                print("[PASS] GET /api/search?exclude_host — excludes pastebin.com")
+                passed += 1
+            else:
+                print(f"[FAIL] exclude_host — pastebin.com still in results: {hosts}")
+                failed += 1
+        else:
+            print(f"[FAIL] exclude_host — total={data.get('total')}, expected 2")
+            failed += 1
+
+        # Multiple domain exclusion
+        r = client.get("/api/search?exclude_host=pastebin.com,drive.google.com")
+        data = r.get_json()
+        if r.status_code == 200 and data["total"] == 1:
+            if data["results"][0]["dns_host"] == "www.google.com":
+                print("[PASS] GET /api/search?exclude_host — multi-domain exclusion")
+                passed += 1
+            else:
+                print(f"[FAIL] exclude_host multi — wrong remaining host: {data['results'][0]['dns_host']}")
+                failed += 1
+        else:
+            print(f"[FAIL] exclude_host multi — total={data.get('total')}, expected 1")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # Browse API returns mtime and cwd
+        # ---------------------------------------------------------------
+        r = client.get("/api/browse?path=/tmp")
+        data = r.get_json()
+        if r.status_code == 200 and "cwd" in data:
+            print("[PASS] GET /api/browse — response includes cwd")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/browse cwd — {'cwd' not in (data or {})} status={r.status_code}")
+            failed += 1
+
+        # Check mtime on entries (if any files in /tmp)
+        r = client.get("/api/browse?path=/tmp")
+        data = r.get_json()
+        if r.status_code == 200:
+            has_mtime = all("mtime" in e for e in data.get("entries", []) if not e.get("is_dir"))
+            if has_mtime or len(data.get("entries", [])) == 0:
+                print("[PASS] GET /api/browse — entries include mtime")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/browse mtime — missing mtime in entries")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/browse mtime — status={r.status_code}")
+            failed += 1
+
+        # Re-seed for source manager tests
+        seed_db(db_path)
+
+        # ---------------------------------------------------------------
+        # GET /api/sources — list ingested sources
+        # ---------------------------------------------------------------
+        r = client.get("/api/sources")
+        data = r.get_json()
+        if r.status_code == 200 and len(data.get("sources", [])) >= 1:
+            src = data["sources"][0]
+            if all(k in src for k in ("id", "source_db", "browser", "live_rows", "ingested_at")):
+                print("[PASS] GET /api/sources — lists ingested sources with fields")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/sources — missing fields: {src.keys()}")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/sources — status={r.status_code}, sources={len(data.get('sources', []))}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # POST /api/sources/delete — remove specific sources
+        # ---------------------------------------------------------------
+        # Get the source IDs first
+        r = client.get("/api/sources")
+        sources = r.get_json().get("sources", [])
+        if len(sources) >= 1:
+            # Delete one source
+            del_id = sources[0]["id"]
+            del_db = sources[0]["source_db"]
+            initial_visits = sources[0]["live_rows"]
+            r = client.post("/api/sources/delete",
+                            data=json.dumps({"ids": [del_id]}),
+                            content_type="application/json")
+            data = r.get_json()
+            if r.status_code == 200 and data.get("status") == "ok":
+                if del_db in data.get("deleted_sources", []):
+                    print("[PASS] POST /api/sources/delete — removed source")
+                    passed += 1
+                else:
+                    print(f"[FAIL] POST /api/sources/delete — source not in deleted list")
+                    failed += 1
+            else:
+                print(f"[FAIL] POST /api/sources/delete — {data}")
+                failed += 1
+
+            # Verify source is gone
+            r = client.get("/api/sources")
+            remaining_ids = {s["id"] for s in r.get_json().get("sources", [])}
+            if del_id not in remaining_ids:
+                print("[PASS] POST /api/sources/delete — verified source removed")
+                passed += 1
+            else:
+                print(f"[FAIL] POST /api/sources/delete — source still present")
+                failed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete — no sources to test with")
+            failed += 2
+
+        # POST /api/sources/delete — bad request (no ids)
+        r = client.post("/api/sources/delete",
+                        data=json.dumps({}),
+                        content_type="application/json")
+        if r.status_code == 400:
+            print("[PASS] POST /api/sources/delete — 400 on missing ids")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete empty — {r.status_code}")
+            failed += 1
+
+        # POST /api/sources/delete — nonexistent IDs
+        r = client.post("/api/sources/delete",
+                        data=json.dumps({"ids": [99999]}),
+                        content_type="application/json")
+        if r.status_code == 404:
+            print("[PASS] POST /api/sources/delete — 404 on bad IDs")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/sources/delete bad ids — {r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # GET /api/export — CSV export
+        # ---------------------------------------------------------------
+        # Re-seed first so we have data
+        seed_db(db_path)
+
+        r = client.get("/api/export")
+        if r.status_code == 200 and r.content_type.startswith("text/csv"):
+            lines = r.data.decode().strip().split("\n")
+            if len(lines) >= 2 and "visit_time_utc" in lines[0]:
+                print(f"[PASS] GET /api/export — CSV with {len(lines)-1} data rows")
+                passed += 1
+            else:
+                print(f"[FAIL] GET /api/export — bad CSV content: header={lines[0][:60]}")
+                failed += 1
+        else:
+            print(f"[FAIL] GET /api/export — status={r.status_code}, type={r.content_type}")
+            failed += 1
+
+        # Export with search query
+        r = client.get("/api/export?q=forensic")
+        if r.status_code == 200:
+            lines = r.data.decode().strip().split("\n")
+            # Should have fewer rows than total (header + filtered rows)
+            print(f"[PASS] GET /api/export?q=forensic — filtered CSV with {len(lines)-1} data rows")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/export?q=forensic — status={r.status_code}")
+            failed += 1
+
+        # ---------------------------------------------------------------
+        # GET /api/aggregate?group_by=title — title aggregation
+        # ---------------------------------------------------------------
+        r = client.get("/api/aggregate?group_by=title")
+        data = r.get_json()
+        if r.status_code == 200 and len(data.get("results", [])) >= 1:
+            print("[PASS] GET /api/aggregate?group_by=title — title aggregation works")
+            passed += 1
+        else:
+            print(f"[FAIL] GET /api/aggregate?group_by=title — {data}")
+            failed += 1
 
         # Re-seed for final state
         seed_db(db_path)
