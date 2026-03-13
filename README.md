@@ -69,19 +69,27 @@ Three views:
 
 ### Search (default)
 - Full-text search with FTS5 syntax (`"quoted phrases"`, `AND`, `OR`, `NOT`, `title:keyword`, `dns_host:github`)
-- Filter by host, browser, visit source, OS, transition type, tag
+- Three search modes: **FTS5** (default), **Contains** (substring), **Regex** (Python `re`)
+- Filter by host, browser, visit source, OS, transition type, tag, date range
+- Exclude specific domains from results
 - Click any hostname to filter, click any tag to drill down
-- Expandable row detail with full provenance chain
+- Expandable row detail with full provenance chain, URL unfurling, and inline string decoder
+- **Export CSV** — download all matching results as CSV with current filters applied
+- Sort by any column (time, host, title, URL, URL length, browser, transition, file source)
 
 ### Explore
-- Progressive aggregation builder — choose a dimension (Hosts, Browsers, Users, Tags, Timeline, etc.)
+- Progressive aggregation builder — choose a dimension (Hosts, Browsers, Users, Tags, Titles, Timeline, etc.)
+- Text search input to filter all aggregation charts and heatmaps via FTS
 - Bar charts rendered on demand, not pre-computed
 - Click any bar to drill through to Search with that filter applied
 - Heatmap view (day-of-week × hour-of-day)
 
 ### Ingest
 - Enter a path to an archive or directory on the server filesystem
+- Built-in file picker for browsing the server filesystem
+- **Source Manager** — view all ingested sources with browser, OS, user, profile, visit count, and ingest timestamp; select and remove individual sources without clearing everything
 - Re-classify button to re-run taggers on existing data
+- Clear All Data for starting fresh
 
 ## Supported Browsers
 
@@ -116,13 +124,18 @@ In the UI, confirmed sources show a solid badge; heuristic detections show a das
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | `GET` | `/api/search?q=...&host=...&browser=...` | Full-text search with filters |
+| `GET` | `/api/export?q=...&host=...` | Export matching results as CSV |
 | `GET` | `/api/visit/<id>` | Single visit detail |
 | `GET` | `/api/aggregate?group_by=dns_host&limit=20` | Dynamic aggregation |
 | `GET` | `/api/filters` | Available filter values for dropdowns |
 | `GET` | `/api/heatmap` | Activity heatmap data |
+| `GET` | `/api/sources` | List all ingested sources with visit counts |
+| `GET` | `/api/browse?path=/` | Browse server filesystem |
+| `POST` | `/api/sources/delete` | `{"ids": [1, 3]}` — remove selected sources |
 | `POST` | `/api/ingest` | `{"path": "/path/to/archive.7z"}` |
 | `POST` | `/api/reingest` | Re-classify all existing visits |
 | `POST` | `/api/rebuild-fts` | Rebuild FTS5 search index |
+| `POST` | `/api/clear` | Wipe all visit data and ingest log |
 
 ### Aggregate endpoint examples
 
@@ -138,6 +151,25 @@ In the UI, confirmed sources show a solid badge; heuristic detections show a das
 
 # Visit source for a specific host
 /api/aggregate?group_by=visit_source&host=github.com
+
+# Top page titles containing "login"
+/api/aggregate?group_by=title&q=login
+
+# Hosts breakdown filtered by text search
+/api/aggregate?group_by=dns_host&q=google
+```
+
+### Export examples
+
+```
+# Export all visits as CSV
+/api/export
+
+# Export only Chrome visits matching "password"
+/api/export?q=password&browser=chrome
+
+# Export date range with regex filter
+/api/export?mode=regex&q=\.tk$&start=2024-01-01T00:00:00Z&end=2024-12-31T23:59:59Z
 ```
 
 ## Adding a Custom Classifier
@@ -171,7 +203,7 @@ FM-Browser/
 │   └── static/index.html        # React SPA
 ├── agents/                      # Claude agent definitions
 ├── scripts/                     # CLI helpers
-├── tests/                       # Unit tests (37 tests)
+├── tests/                       # End-to-end tests (53 tests)
 ├── server.py                    # Legacy monolithic server
 └── fm-browser.html              # Legacy SPA
 ```
@@ -197,3 +229,31 @@ options:
 - Flask
 - p7zip-full (system package for archive extraction)
 - No JavaScript build step — the SPA uses React via CDN
+
+## Acknowledgments
+
+This tool exists because of the extraordinary work of people and communities who build things and share them freely. We stand on the shoulders of giants, and we are grateful.
+
+**[SQLite](https://sqlite.org/)** and its [FTS5 extension](https://www.sqlite.org/fts5.html) — D. Richard Hipp and the SQLite team have given the world the most widely deployed database engine in history, and they did it as a gift to the public domain. The fact that a single-analyst forensic tool can do full-text search across millions of browser visits with zero infrastructure is because of their decades of careful, principled engineering. The FTS5 module is a masterpiece that makes this entire project's search capability possible. Thank you.
+
+**[Flask](https://flask.palletsprojects.com/)** — Armin Ronacher and the Pallets team created a web framework that gets out of your way and lets you ship. Flask's philosophy of simplicity and extensibility means this entire server is one readable file. The ecosystem Armin built — Werkzeug, Jinja2, Click — represents some of the most thoughtfully designed Python code ever written. Thank you.
+
+**[React](https://react.dev/)** — Jordan Walke created React at Facebook, and the React team at Meta has continued to evolve it into one of the most transformative UI libraries ever built. The component model changed how we all think about interfaces. The fact that we can ship a single HTML file with a CDN import and build a full forensic analysis SPA is a testament to how well React was designed from the start. Thank you.
+
+**[Babel](https://babeljs.io/)** — Sebastian McKenzie started Babel as a teenager, and the team that grew around it made modern JavaScript accessible to everyone. Babel Standalone lets us write JSX directly in the browser without a build step, which is the reason this tool has zero frontend toolchain dependencies. That design choice keeps FM-Browser simple and portable. Thank you.
+
+**[p7zip](https://p7zip.sourceforge.net/) and [7-Zip](https://www.7-zip.org/)** — Igor Pavlov built 7-Zip and released it under LGPL, and the p7zip team ported it to POSIX systems. Forensic acquisitions often arrive as password-protected 7z archives, and this tool's ability to recursively crack into nested archives is entirely thanks to their work. Thank you.
+
+**[IBM Plex](https://www.ibm.com/plex/) and [DM Sans](https://fonts.google.com/specimen/DM+Sans)** — Mike Abbink and Bold Monday designed IBM Plex as IBM's corporate typeface and released it to the world as open source. Colophon Foundry designed DM Sans for DeepMind. These fonts make forensic data readable and the interface clean. Beautiful typography is an act of generosity. Thank you.
+
+**[Google Fonts](https://fonts.google.com/)** — For hosting and serving open-source typefaces to the world for free, making good typography accessible to every project regardless of budget. Thank you.
+
+**[Cloudflare](https://cdnjs.cloudflare.com/)** — For cdnjs, the free and open-source CDN that serves React, Babel, and countless other libraries to developers worldwide. Infrastructure is invisible when it works well, and cdnjs just works. Thank you.
+
+**The browser forensics community** — The analysts, researchers, and DFIR practitioners who documented how Chrome, Firefox, Safari, and Edge store their history data. The schemas are undocumented and change between versions. Every blog post explaining `visit_source` values, Firefox frecency scores, Safari binary timestamps, and Chromium epoch offsets made this tool's accuracy possible. Thank you.
+
+**The Python community** — For building a standard library so comprehensive that this entire four-stage forensic pipeline — archive extraction, binary parsing, timestamp conversion, URL decomposition, regex classification, CSV export, and a web server — runs on stdlib plus one package. That's not an accident; it's the result of thirty years of thoughtful contributions from thousands of people. Thank you.
+
+---
+
+*If you use this tool in your work and it saves you time, consider paying it forward. Contribute to the open-source projects listed above, write up your forensic findings, share your knowledge with the community. That's how we got here.*
