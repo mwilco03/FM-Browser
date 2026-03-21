@@ -1,10 +1,15 @@
 """Stage 1: Recursive archive extraction with provenance tracking.
 
+Archive type detection uses **magic bytes** (file header signatures), not file
+extensions.  A file named ``evidence.bin`` with a ZIP header is handled as a
+ZIP, while a ``.zip`` whose header is actually 7z is handled as 7z.  Extension
+is only consulted as a last-resort fallback when the header cannot be read.
+
 Portable extraction strategy:
   1. zip/tar/tar.gz/tar.bz2 — stdlib zipfile/tarfile (always available)
-  2. .7z — py7zr if installed, else 7z CLI
-  3. .rar — rarfile if installed, else 7z CLI
-  4. Anything else — 7z CLI as last resort
+  2. 7z — py7zr if installed, else 7z CLI
+  3. rar — rarfile if installed, else 7z CLI
+  4. Unknown magic — try all extractors, CLI 7z as last resort
 
 Install `pip install fm-browser[archives]` for fully portable mode
 (no system 7z/unzip/tar required).
@@ -27,6 +32,56 @@ from .models import ExtractedFile
 LOG = logging.getLogger("history_search.extract")
 
 ARCHIVE_EXTENSIONS = {".7z", ".zip", ".tgz", ".tar", ".gz", ".rar"}
+
+# Magic byte signatures for archive detection (offset, bytes)
+_MAGIC_SIGNATURES = {
+    "zip":   (0, b"PK\x03\x04"),
+    "zip_empty": (0, b"PK\x05\x06"),       # empty zip
+    "zip_spanned": (0, b"PK\x07\x08"),     # spanned zip
+    "7z":    (0, b"7z\xbc\xaf\x27\x1c"),
+    "rar4":  (0, b"Rar!\x1a\x07\x00"),
+    "rar5":  (0, b"Rar!\x1a\x07\x01\x00"),
+    "gzip":  (0, b"\x1f\x8b"),
+    "bzip2": (0, b"BZh"),
+    "xz":    (0, b"\xfd7zXZ\x00"),
+}
+_TAR_MAGIC_OFFSET = 257
+_TAR_MAGIC = b"ustar"
+
+# Maximum bytes we need to read for any signature check
+_MAGIC_READ_SIZE = 512
+
+
+def _detect_archive_type(path: Path) -> Optional[str]:
+    """Detect archive type by reading header bytes (magic signatures).
+
+    Returns one of: 'zip', '7z', 'rar', 'tar', 'gzip', 'bzip2', 'xz', or None.
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(_MAGIC_READ_SIZE)
+    except (OSError, IOError):
+        return None
+
+    if len(header) == 0:
+        return None
+
+    # Check fixed-offset signatures
+    for sig_name, (offset, magic) in _MAGIC_SIGNATURES.items():
+        if len(header) >= offset + len(magic) and header[offset:offset + len(magic)] == magic:
+            if sig_name.startswith("zip"):
+                return "zip"
+            if sig_name.startswith("rar"):
+                return "rar"
+            return sig_name
+
+    # tar has magic at offset 257
+    if len(header) >= _TAR_MAGIC_OFFSET + len(_TAR_MAGIC):
+        if header[_TAR_MAGIC_OFFSET:_TAR_MAGIC_OFFSET + len(_TAR_MAGIC)] == _TAR_MAGIC:
+            return "tar"
+
+    return None
+
 
 # Lazy-loaded optional libraries
 _py7zr = None
@@ -63,7 +118,17 @@ def _has_7z_cli() -> bool:
 
 
 def _is_archive(path: Path) -> bool:
-    """Check if a file is a recognized archive format."""
+    """Check if a file is a recognized archive format using magic bytes.
+
+    Reads the file header to identify archive type regardless of extension.
+    Falls back to extension check only if the file cannot be read.
+    """
+    if not path.is_file():
+        return False
+    detected = _detect_archive_type(path)
+    if detected is not None:
+        return True
+    # Fallback: extension-only check for exotic formats the CLI tools may handle
     suffix = path.suffix.lower()
     if suffix in ARCHIVE_EXTENSIONS:
         return True
@@ -122,15 +187,21 @@ def _check_path_traversal_7z_cli(archive_path: Path) -> bool:
 
 
 def _check_path_traversal(archive_path: Path, output_dir: Path) -> bool:
-    """Reject archives containing path traversal attempts."""
-    suffix = archive_path.suffix.lower()
-    suffixes = "".join(s.lower() for s in archive_path.suffixes)
+    """Reject archives containing path traversal attempts.
 
-    if suffix == ".zip":
+    Uses magic-byte detection to determine the correct traversal checker
+    regardless of file extension.
+    """
+    archive_type = _detect_archive_type(archive_path)
+
+    if archive_type == "zip":
         return _check_path_traversal_zip(archive_path)
-    elif ".tar" in suffixes or suffix in (".tgz", ".gz"):
+    elif archive_type in ("tar", "gzip", "bzip2", "xz"):
         return _check_path_traversal_tar(archive_path)
+    elif archive_type in ("7z", "rar") and _has_7z_cli():
+        return _check_path_traversal_7z_cli(archive_path)
     elif _has_7z_cli():
+        # Unknown type — try 7z CLI listing as best-effort check
         return _check_path_traversal_7z_cli(archive_path)
     return True
 
@@ -257,13 +328,15 @@ def _try_extract_tar_cli(archive_path: Path, dest: Path) -> bool:
 def _extract_single(archive_path: Path, dest: Path) -> bool:
     """Extract a single archive file to the destination directory.
 
-    Strategy: pure-Python first (portable), CLI fallback (for edge cases).
+    Uses magic-byte detection to choose the correct extractor regardless of
+    file extension.  Strategy: pure-Python first (portable), CLI fallback.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    suffix = archive_path.suffix.lower()
-    suffixes = "".join(s.lower() for s in archive_path.suffixes)
+    archive_type = _detect_archive_type(archive_path)
 
-    if suffix == ".zip":
+    LOG.debug("Magic-byte detection for %s: %s", archive_path.name, archive_type or "unknown")
+
+    if archive_type == "zip":
         if _try_extract_zip_python(archive_path, dest):
             return True
         # AES-encrypted zips need CLI
@@ -271,25 +344,34 @@ def _extract_single(archive_path: Path, dest: Path) -> bool:
             return True
         return _try_extract_7z_cli(archive_path, dest)
 
-    elif ".tar" in suffixes or suffix in (".tgz", ".gz"):
+    elif archive_type in ("tar", "gzip", "bzip2", "xz"):
         if _try_extract_tar_python(archive_path, dest):
             return True
         if _try_extract_tar_cli(archive_path, dest):
             return True
         return _try_extract_7z_cli(archive_path, dest)
 
-    elif suffix == ".7z":
+    elif archive_type == "7z":
         if _try_extract_7z_python(archive_path, dest):
             return True
         return _try_extract_7z_cli(archive_path, dest)
 
-    elif suffix == ".rar":
+    elif archive_type == "rar":
         if _try_extract_rar_python(archive_path, dest):
             return True
         return _try_extract_7z_cli(archive_path, dest)
 
     else:
-        # Unknown format — try everything
+        # Magic bytes didn't match — try everything as last resort
+        LOG.debug("No magic match for %s, trying all extractors", archive_path.name)
+        if _try_extract_zip_python(archive_path, dest):
+            return True
+        if _try_extract_tar_python(archive_path, dest):
+            return True
+        if _try_extract_7z_python(archive_path, dest):
+            return True
+        if _try_extract_rar_python(archive_path, dest):
+            return True
         return _try_extract_7z_cli(archive_path, dest)
 
 
