@@ -1,8 +1,12 @@
 """Constants, patterns, and classifier registry."""
 import re
 
-# Archive extraction passwords (tried in order)
-ARCHIVE_PASSWORDS = ["infected", "dangerous", ""]
+# Default archive extraction passwords, tried in order after any user-supplied
+# passwords. The empty string is tried first so unencrypted archives don't pay
+# the cost of three failed decryption attempts before succeeding. The
+# "infected" / "dangerous" entries are common malware-sample passwords; they
+# are kept as last-resort defaults for compatibility.
+ARCHIVE_PASSWORDS = ["", "infected", "dangerous"]
 
 # Maximum extraction ratio (zip bomb protection)
 MAX_EXTRACTION_RATIO = 100
@@ -66,6 +70,10 @@ MACOS_BROWSER_PATHS = [
     (re.compile(r"Users/([^/]+)/Library/Application Support/Microsoft Edge/([^/]+)/History", re.I), "edge"),
     (re.compile(r"Users/([^/]+)/Library/Application Support/Vivaldi/([^/]+)/History", re.I), "vivaldi"),
     (re.compile(r"Users/([^/]+)/Library/Application Support/Arc/User Data/([^/]+)/History", re.I), "arc"),
+    # iOS Safari (post-iOS 11): HomeDomain inside an iTunes/Finder backup.
+    (re.compile(r"HomeDomain/Library/Safari/History\.db", re.I), "safari"),
+    # iOS Safari MD5-hashed backup path (1a565... is "HomeDomain-Library/Safari/History.db").
+    (re.compile(r"/1a565939c2169d33b2af8eb9e7ed0a8d8eed9fbe$", re.I), "safari"),
 ]
 
 # Windows browser path patterns

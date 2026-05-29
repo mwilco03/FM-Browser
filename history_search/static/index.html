@@ -77,18 +77,18 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--txt-0);min-heigh
 .b-os{background:var(--purple-dim);color:var(--purple)}
 
 /* Table */
-.tbl-wrap{overflow-x:auto;overflow-y:visible;max-width:100%}
-.tbl{border-collapse:collapse;font-size:.78rem;min-width:100%;white-space:nowrap}
-.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:1;cursor:pointer;user-select:none}
+.tbl-wrap{overflow-x:auto;overflow-y:visible;width:100%;max-width:100%;border:1px solid var(--border);border-radius:var(--r)}
+.tbl{border-collapse:collapse;font-size:.78rem;width:100%;table-layout:auto}
+.tbl th{text-align:left;padding:8px 10px;font-family:var(--mono);font-size:.68rem;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--bg-1);position:sticky;top:0;z-index:2;box-shadow:0 1px 0 var(--border);cursor:pointer;user-select:none}
 .tbl th:hover{color:var(--accent)}
 .tbl th .sort-arrow{margin-left:4px;font-size:.6rem}
 .tbl td{padding:7px 10px;border-bottom:1px solid rgba(42,45,64,.4);vertical-align:top;line-height:1.5}
 .tbl tr:hover td{background:var(--bg-1)}
 .cell-t{font-family:var(--mono);font-size:.72rem;color:var(--txt-1);white-space:nowrap}
-.cell-h{font-family:var(--mono);font-size:.74rem;color:var(--amber);cursor:pointer}
+.cell-h{font-family:var(--mono);font-size:.74rem;color:var(--amber);cursor:pointer;max-width:200px;overflow-wrap:anywhere}
 .cell-h:hover{text-decoration:underline}
-.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);white-space:nowrap}
-.cell-tl{color:var(--txt-0);white-space:nowrap}
+.cell-u{font-family:var(--mono);font-size:.7rem;color:var(--txt-1);max-width:420px;white-space:normal;overflow-wrap:anywhere;word-break:break-all}
+.cell-tl{color:var(--txt-0);max-width:280px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .cell-q{font-family:var(--mono);font-size:.68rem;color:var(--green);white-space:nowrap}
 .cell-tr{font-family:var(--mono);font-size:.68rem;color:var(--txt-2)}
 .cell-src{font-family:var(--mono);font-size:.66rem;color:var(--blue);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -216,10 +216,9 @@ const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const SOURCE_CLS = {local:'b-local',synced:'b-synced',extension:'b-extension',imported:'b-imported',carved:'b-carved',unknown:'b-unknown'};
 const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',imported:'\u2B07',carved:'\u{1F52E}',unknown:'?'};
 
-// API token stored in sessionStorage; set via Security panel in Ingest tab
-function getToken(){return sessionStorage.getItem('api_token')||''}
-function setToken(t){sessionStorage.setItem('api_token',t)}
-function authHeaders(extra={}){const t=getToken();const h={...extra};if(t)h['X-API-Token']=t;return h}
+// Mutating requests are protected by same-origin policy + loopback gating
+// on the server. No client-side token is needed.
+const JSON_HEADERS = {'Content-Type':'application/json'};
 
 const api = {
   search: p => fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
@@ -227,13 +226,13 @@ const api = {
   aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(r=>r.json()),
   filters: () => fetch('/api/filters').then(r=>r.json()),
   heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
-  ingest: (path, clear) => fetch('/api/ingest',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({path, clear: !!clear})}).then(r=>r.json()),
-  reingest: () => fetch('/api/reingest',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
-  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
-  clear: () => fetch('/api/clear',{method:'POST',headers:authHeaders()}).then(r=>r.json()),
+  ingest: (path, clear, passwords) => fetch('/api/ingest',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({path, clear: !!clear, passwords: passwords||[]})}).then(r=>r.json()),
+  reingest: () => fetch('/api/reingest',{method:'POST'}).then(r=>r.json()),
+  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(r=>r.json()),
+  clear: () => fetch('/api/clear',{method:'POST'}).then(r=>r.json()),
   browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(r=>r.json()),
   sources: () => fetch('/api/sources').then(r=>r.json()),
-  deleteSources: ids => fetch('/api/sources/delete',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({ids})}).then(r=>r.json()),
+  deleteSources: ids => fetch('/api/sources/delete',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({ids})}).then(r=>r.json()),
 };
 
 function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
@@ -491,7 +490,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const[sortCol,setSortCol]=useState('time');
   const[sortDir,setSortDir]=useState('desc');
   const[decodeInput,setDecodeInput]=useState('');
-  const[searchMode,setSearchMode]=useState('fts');
+  const[searchMode,setSearchMode]=useState('smart');
   const[searchError,setSearchError]=useState('');
   const sentinelRef=useRef(null);
   const loadingMore=useRef(false);
@@ -586,23 +585,35 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const COL_NUM = 10;
 
   const modePlaceholders={
+    smart:'Search URL, title, host, query, tags...',
     fts:'FTS5: "google maps", title:news, dns_host:github',
     contains:'Substring match: matches anywhere in URL, title, host, query, tags',
     regex:'Regex: \\.tk$, login.*admin, https?://10\\., (?i)password'
   };
   const modeHints={
-    fts:'Supports AND, OR, NOT, "quoted phrases", column:prefix queries',
+    smart:'Smart mode: handles spaces, punctuation, URLs. Switch to Advanced for raw FTS5 / regex.',
+    fts:'Raw FTS5: AND, OR, NOT, "quoted phrases", column:prefix queries',
     contains:'Case-insensitive substring match across all text fields',
     regex:'Python regex (re.search) across URL, title, host, query string, tags, unfurl'
   };
+  const modeButtons=[
+    {id:'smart',label:'Smart'},
+    {id:'fts',label:'FTS5'},
+    {id:'contains',label:'Contains'},
+    {id:'regex',label:'Regex'},
+  ];
 
   return(<div>
     <div className="search-wrap">
       <span className="search-ico">&#x1F50D;</span>
       <input className="search-in" placeholder={modePlaceholders[searchMode]} value={q} onChange={e=>setQ(e.target.value)} autoFocus/>
-      <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
-        <span style={{fontFamily:'var(--mono)',fontSize:'.62rem',color:'var(--txt-2)'}}>Mode:</span>
-        {['fts','contains','regex'].map(m=><button key={m} className="decode-btn" style={searchMode===m?{borderColor:'var(--accent)',color:'var(--accent)',background:'var(--accent-dim)'}:{}} onClick={()=>{setSearchMode(m);setOffset(0)}}>{m==='fts'?'FTS5':m==='contains'?'Contains':'Regex'}</button>)}
+      <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4,flexWrap:'wrap'}}>
+        <span className="search-hint" style={{margin:0,marginRight:2}}>Mode:</span>
+        {modeButtons.map(m=>
+          <button key={m.id} className="decode-btn"
+                  style={searchMode===m.id?{borderColor:'var(--accent)',color:'var(--accent)',background:'var(--accent-dim)'}:{}}
+                  onClick={()=>{setSearchMode(m.id);setOffset(0)}}>{m.label}</button>
+        )}
         <span className="search-hint" style={{margin:0}}>{modeHints[searchMode]}</span>
       </div>
       {searchError&&<div style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.72rem',marginTop:4}}>{searchError}</div>}
@@ -963,9 +974,8 @@ function IngestView(){
   const[filterInfo,setFilterInfo]=useState(null);
   const[showPicker,setShowPicker]=useState(false);
   const[clearFirst,setClearFirst]=useState(false);
-  const[token,setTokenLocal]=useState(getToken());
+  const[passwords,setPasswords]=useState('');
   const[srcRefresh,setSrcRefresh]=useState(0);
-  const handleTokenChange=(e)=>{setTokenLocal(e.target.value);setToken(e.target.value)};
   const refreshAll=()=>{api.filters().then(setFilterInfo).catch(()=>{});setSrcRefresh(k=>k+1)};
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
@@ -974,10 +984,12 @@ function IngestView(){
     if(!path.trim())return;
     setLoading(true);setResult(null);setLog([{msg:'Starting pipeline...'}]);
     if(clearFirst){setLog(prev=>[...prev,{msg:'Clearing existing data first...'}])}
+    const pwList=passwords.split('\n').map(s=>s.trim()).filter(Boolean);
     try{
-      const r = await api.ingest(path.trim(), clearFirst);
+      const r = await api.ingest(path.trim(), clearFirst, pwList);
       setResult(r);
-      setLog(prev=>[...prev,{msg:`Done: ${r.databases_found} DBs, ${r.total_new_rows||0} new rows`}]);
+      if(r.error){setLog(prev=>[...prev,{msg:`Error: ${r.error}`}])}
+      else{setLog(prev=>[...prev,{msg:`Done: ${r.databases_found} DBs, ${r.total_new_rows||0} new rows`}])}
       refreshAll();
     }catch(e){
       setResult({error:e.message});
@@ -1009,19 +1021,10 @@ function IngestView(){
   return(<div>
     {showPicker&&<FilePicker onSelect={(p)=>{setPath(p);setShowPicker(false)}} onClose={()=>setShowPicker(false)}/>}
 
-    <div className="ing-panel" style={{marginBottom:14}}>
-      <div className="card-h">API Token</div>
-      <p style={{color:'var(--txt-2)',fontSize:'.72rem',marginBottom:6}}>
-        Paste the API token printed at server startup. Required for ingest, clear, and reclassify operations.
-      </p>
-      <input className="ing-in" type="password" placeholder="Paste API token from server console" value={token} onChange={handleTokenChange}
-             style={{maxWidth:420,fontFamily:'var(--mono)',fontSize:'.72rem'}}/>
-    </div>
-
     <div className="ing-panel">
       <div className="card-h">Ingest Archive or Directory</div>
       <p style={{color:'var(--txt-2)',fontSize:'.78rem',marginBottom:12}}>
-        Point to a <code>.7z</code> archive (passwords: infected/dangerous), <code>.tar.gz</code>, <code>.zip</code>,
+        Point to a <code>.7z</code> archive, <code>.tar.gz</code>, <code>.zip</code>,
         or a directory. Nested archives are extracted recursively. Browser DBs detected by schema probing.
         Microsoft Teams JSON logs also supported.
       </p>
@@ -1030,6 +1033,14 @@ function IngestView(){
         <button className="ing-btn sec" onClick={()=>setShowPicker(true)} disabled={loading}>Browse...</button>
         <button className="ing-btn" onClick={go} disabled={loading}>{loading?<><Spin/>Working...</>:'Ingest'}</button>
       </div>
+      <details style={{marginTop:10}}>
+        <summary style={{fontFamily:'var(--mono)',fontSize:'.72rem',color:'var(--txt-2)',cursor:'pointer'}}>
+          Archive passwords (one per line) — for password-protected .zip / .7z / .rar
+        </summary>
+        <textarea className="ing-in" rows={3} value={passwords} onChange={e=>setPasswords(e.target.value)}
+                  placeholder={"hunter2\ncase-2026-04-pw\ninfected"}
+                  style={{marginTop:6,fontFamily:'var(--mono)',fontSize:'.72rem',width:'100%',maxWidth:480,resize:'vertical'}}/>
+      </details>
       <div style={{display:'flex',gap:12,alignItems:'center',marginTop:10}}>
         <label style={{fontFamily:'var(--mono)',fontSize:'.72rem',color:'var(--txt-2)',display:'flex',alignItems:'center',gap:5,cursor:'pointer'}}>
           <input type="checkbox" checked={clearFirst} onChange={e=>setClearFirst(e.target.checked)} style={{accentColor:'var(--red)'}}/>
@@ -1055,6 +1066,23 @@ function IngestView(){
         </tr>)}
       </tbody></table></div>
     </div>}
+
+    {result&&Array.isArray(result.extraction_failures)&&result.extraction_failures.length>0&&
+      <div className="card" style={{marginBottom:14,borderColor:'var(--amber)'}}>
+        <div className="card-h" style={{color:'var(--amber)'}}>Extraction failures ({result.extraction_failures.length})</div>
+        <p style={{color:'var(--txt-2)',fontFamily:'var(--mono)',fontSize:'.72rem',marginBottom:8}}>
+          {result.extraction_failures.some(f=>f.reason==='password_required')
+            ? 'One or more archives need a password. Add it to the Passwords field above and re-ingest.'
+            : 'One or more archives could not be extracted.'}
+        </p>
+        <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Archive</th><th>Reason</th><th>Detail</th></tr></thead><tbody>
+          {result.extraction_failures.map((f,i)=><tr key={i}>
+            <td className="cell-u" style={{maxWidth:400}}>{f.archive}</td>
+            <td style={{color:'var(--amber)',fontFamily:'var(--mono)',fontSize:'.72rem'}}>{f.reason}</td>
+            <td className="cell-t">{f.detail}</td>
+          </tr>)}
+        </tbody></table></div>
+      </div>}
 
     {result?.error&&<div className="card"><div className="card-h" style={{color:'var(--red)'}}>Error</div><p style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.78rem'}}>{result.error}</p></div>}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import json
 import logging
 import re
@@ -719,6 +720,66 @@ def _cls_jwt(r: VisitRecord) -> Optional[str]:
     """Detect JWT tokens in URLs."""
     if re.search(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}", r.full_url):
         return "jwt_token"
+    return None
+
+
+# Unicode blocks commonly abused to forge ASCII-looking hostnames (IDN homograph).
+_CONFUSABLE_RANGES = (
+    (0x0370, 0x03FF),  # Greek
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0500, 0x052F),  # Cyrillic Supplement
+    (0x2160, 0x218F),  # Number Forms (Roman-numeral lookalikes)
+)
+
+
+def decode_punycode_host(host: str) -> str:
+    """Decode any `xn--` labels in a host to their Unicode form.
+
+    A registrable domain can mix encoded and plain labels, so decode per-label.
+    Returns the original label on any segment that won't decode.
+    """
+    if "xn--" not in (host or "").lower():
+        return host or ""
+    out = []
+    for label in host.split("."):
+        if label.lower().startswith("xn--"):
+            try:
+                out.append(codecs.decode(label[4:].encode("ascii"), "punycode"))
+            except Exception:
+                out.append(label)
+        else:
+            out.append(label)
+    return ".".join(out)
+
+
+def _has_confusable_script(text: str) -> bool:
+    return any(any(lo <= ord(ch) <= hi for lo, hi in _CONFUSABLE_RANGES)
+               for ch in text)
+
+
+def is_idn_homograph(host: str) -> bool:
+    """True if a host (after punycode decode) mixes ASCII Latin letters with
+    characters from a confusable non-Latin script — the classic IDN homograph
+    lookalike (e.g. `pаypal.com` with a Cyrillic 'а'). A legitimate single-script
+    IDN (all-Greek, or accented Latin like münchen.de) is NOT flagged."""
+    decoded = decode_punycode_host(host)
+    has_ascii_latin = any("a" <= ch.lower() <= "z" for ch in decoded)
+    return has_ascii_latin and _has_confusable_script(decoded)
+
+
+@classifier("punycode_host")
+def _cls_punycode_host(r: VisitRecord) -> Optional[str]:
+    """Flag hosts using punycode (xn--) — common in lookalike phishing domains."""
+    if "xn--" in (r.dns_host or "").lower():
+        return "punycode_host"
+    return None
+
+
+@classifier("idn_homograph")
+def _cls_idn_homograph(r: VisitRecord) -> Optional[str]:
+    """Flag mixed-script lookalike domains (e.g. Cyrillic 'а' in paypal)."""
+    if is_idn_homograph(r.dns_host or ""):
+        return "idn_homograph"
     return None
 
 

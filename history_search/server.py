@@ -22,13 +22,13 @@ import logging
 import os
 import pkgutil
 import re
-import secrets
 import shutil
 import sqlite3
 import tempfile
 from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
@@ -37,8 +37,8 @@ from .pipeline.classify import classify_batch
 from .pipeline.constants import DEFAULT_SEARCH_LIMIT, INTERVAL_STRFTIME, MAX_SEARCH_LIMIT
 from .pipeline.extract import discover_files, extract_recursive
 from .pipeline.index import (
-    TABLE_FTS, TABLE_VISITS, init_schema, insert_visits,
-    is_already_ingested, rebuild_fts, get_visit_count,
+    TABLE_FTS, TABLE_VISITS, FTS_COLUMNS, init_schema, insert_visits,
+    is_already_ingested, rebuild_fts, get_visit_count, fts_row_count,
 )
 from .pipeline.ingest import discover_databases, ingest_database
 
@@ -47,34 +47,83 @@ LOG = logging.getLogger("history_search")
 app = Flask(__name__, static_folder="static")
 
 # ---------------------------------------------------------------------------
-# Security: API token for mutating endpoints, browse path restriction
+# Security: loopback-by-default + same-origin CSRF defense
 # ---------------------------------------------------------------------------
+#
+# Forensic tools run on the analyst's workstation. We don't need a token-paste
+# dance: bind to 127.0.0.1, trust loopback, and reject cross-origin POSTs by
+# checking Origin/Referer against Host. For non-loopback binds the operator
+# must pass --allow-remote and is expected to put a real reverse proxy with
+# auth in front of the server.
 
-# Generated once at startup; printed to console for the responder to use.
-# Read-only endpoints (search, visit, aggregate, filters, heatmap) are open.
-API_TOKEN: Optional[str] = None  # Set in main()
+ALLOW_REMOTE: bool = False  # Set in main()
 
 # Restrict /api/browse to these root paths (set via --browse-root)
-BROWSE_ROOTS: List[Path] = []  # Empty = unrestricted (legacy default)
+BROWSE_ROOTS: List[Path] = []  # Empty = restricted to CWD by default
 
 
-def require_token(fn):
-    """Decorator: reject mutating requests without a valid API token."""
+_LOOPBACK_PREFIXES = ("127.", "::1", "::ffff:127.")
+
+
+def _is_loopback_request() -> bool:
+    """True if the request originated on the local loopback interface."""
+    addr = (request.remote_addr or "").strip()
+    if not addr:
+        return False
+    if addr in ("127.0.0.1", "::1", "localhost"):
+        return True
+    return any(addr.startswith(p) for p in _LOOPBACK_PREFIXES)
+
+
+def _is_same_origin() -> bool:
+    """CSRF defense: Origin (or Referer) host must match the request Host.
+
+    Browsers send Origin on POST/PUT/DELETE; same-origin XHRs from our SPA
+    will always include it. Cross-site form submissions land here too but
+    their Origin reflects the attacker's site, not ours.
+    """
+    origin = request.headers.get("Origin") or request.headers.get("Referer", "")
+    if not origin:
+        return False
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if not parsed.netloc:
+        return False
+    return parsed.netloc.lower() == request.host.lower()
+
+
+def require_local(fn):
+    """Decorator for mutating endpoints.
+
+    - Reject non-loopback requests unless --allow-remote was passed.
+    - Reject any request whose Origin/Referer is not same-origin (CSRF).
+    """
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if API_TOKEN is None:
-            return fn(*args, **kwargs)  # auth disabled (e.g. testing)
-        token = request.headers.get("X-API-Token") or request.args.get("token")
-        if token != API_TOKEN:
-            return jsonify({"error": "unauthorized — supply X-API-Token header"}), 401
+        if not _is_loopback_request() and not ALLOW_REMOTE:
+            return jsonify({
+                "error": "remote requests disabled. Bind with --allow-remote "
+                         "and put a reverse proxy with auth in front of the server."
+            }), 403
+        if not _is_same_origin():
+            return jsonify({
+                "error": "cross-origin request rejected (CSRF defense). "
+                         "Open the SPA from the server's own URL."
+            }), 403
         return fn(*args, **kwargs)
     return wrapper
 
 
 def _is_within_browse_roots(target: Path) -> bool:
-    """Check if target is within any allowed browse root."""
+    """Check if target is within any allowed browse root.
+
+    BROWSE_ROOTS is always populated (CWD by default). Default-deny when
+    somehow empty.
+    """
     if not BROWSE_ROOTS:
-        return True  # unrestricted
+        return False
     resolved = target.resolve()
     return any(resolved == root or str(resolved).startswith(str(root) + os.sep)
                for root in BROWSE_ROOTS)
@@ -85,12 +134,19 @@ def _is_within_browse_roots(target: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def run_pipeline(index_db: str, source_path: Path,
-                 on_progress: Optional[callable] = None) -> Dict[str, Any]:
+                 on_progress: Optional[callable] = None,
+                 passwords: Optional[List[str]] = None) -> Dict[str, Any]:
     """Run the full 4-stage pipeline on an archive or directory.
 
-    Returns ingestion statistics.
+    Returns ingestion statistics, including any extraction failures (e.g.
+    password-protected archives the supplied passwords didn't open).
     """
-    stats: Dict[str, Any] = {"databases_found": 0, "ingested": [], "total_new_rows": 0}
+    stats: Dict[str, Any] = {
+        "databases_found": 0,
+        "ingested": [],
+        "total_new_rows": 0,
+        "extraction_failures": [],
+    }
 
     # Stage 1: Extract if archive
     work_dir = source_path
@@ -99,7 +155,10 @@ def run_pipeline(index_db: str, source_path: Path,
         tmp_dir = Path(tempfile.mkdtemp(prefix="hist_"))
         if on_progress:
             on_progress("Extracting archives...")
-        extract_recursive(source_path, tmp_dir, on_progress=on_progress)
+        ext_result = extract_recursive(source_path, tmp_dir,
+                                       on_progress=on_progress,
+                                       passwords=passwords)
+        stats["extraction_failures"] = list(ext_result.failures)
         work_dir = tmp_dir
 
     try:
@@ -223,18 +282,72 @@ FILTER_COLUMNS = {
 }
 
 
-SEARCH_COLS = ("v.full_url", "v.title", "v.dns_host",
-               "v.query_string_decoded", "v.tags", "v.unfurl")
+# Columns used by the non-FTS search paths (contains / regex / LIKE fallback).
+# Derived from the FTS5 index column list so the two can never drift.
+SEARCH_COLS = tuple(f"v.{c}" for c in FTS_COLUMNS)
+
+SEARCH_MODES = ("smart", "fts", "contains", "regex")
+DEFAULT_SEARCH_MODE = "smart"
+
+# Whitelists for user-supplied query parameters. Every value that reaches an
+# ORDER BY / GROUP BY / metric position in raw SQL must be a member of one of
+# these sets — never interpolated from free request input.
+SORT_KEYS = ("time", "host", "title", "browser", "url", "url_length",
+             "source", "transition", "duration", "file_source")
+AGG_GROUP_BY = ("dns_host", "browser", "os_platform", "os_username",
+                "browser_profile", "endpoint_name", "visit_source",
+                "transition_type", "browser_engine", "title",
+                "tags", "time_hour", "time_day", "time_week", "time_month")
+AGG_METRICS = ("count", "unique_urls", "unique_users")
+
+# FTS5 reserved keywords (case-insensitive). Tokens matching these are
+# dropped during smart-mode sanitization to avoid syntax errors.
+_FTS5_KEYWORDS = {"and", "or", "not", "near"}
+
+# Anything not alphanumeric becomes a token boundary in smart mode.
+_FTS5_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
+
+LIKE_ESCAPE_CHAR = "\\"
+
+
+def _like_escape(value: str) -> str:
+    """Escape SQL LIKE wildcards so user input is treated literally."""
+    return (
+        value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+        .replace("%", LIKE_ESCAPE_CHAR + "%")
+        .replace("_", LIKE_ESCAPE_CHAR + "_")
+    )
+
+
+def _smart_to_fts5(q: str) -> str:
+    """Translate a free-form user query into a safe FTS5 expression.
+
+    Splits on non-alphanumeric characters, drops single-char and FTS5-keyword
+    tokens, AND-joins the survivors with prefix matching. Returns "" if no
+    usable tokens remain — caller should fall back to LIKE in that case.
+    """
+    parts = _FTS5_TOKEN_SPLIT.split(q.lower())
+    tokens = [t for t in parts if len(t) >= 2 and t not in _FTS5_KEYWORDS]
+    if not tokens:
+        return ""
+    return " AND ".join(f"{t}*" for t in tokens)
 
 
 def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
-                 search_mode: str = "fts"):
+                 search_mode: str = DEFAULT_SEARCH_MODE):
     """Build WHERE clause from filters and optional search query.
 
-    search_mode: "fts" (FTS5 MATCH), "contains" (LIKE substring),
-                 "regex" (REGEXP).
+    search_mode:
+      "smart"    — sanitized FTS5 with prefix matching (default).
+      "fts"      — raw FTS5 MATCH for power users who want the full grammar.
+      "contains" — LIKE substring match across all search columns.
+      "regex"    — Python regex via the REGEXP function.
+
+    Returns (where_sql, params, used_fts) where used_fts indicates whether
+    the FTS5 shadow table is needed in the FROM clause.
     """
     clauses, params = [], []
+    used_fts = False
 
     if fts_q:
         if search_mode == "regex":
@@ -244,14 +357,30 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
                 params.append(fts_q)
             clauses.append("(" + " OR ".join(subs) + ")")
         elif search_mode == "contains":
+            esc = _like_escape(fts_q)
             subs = []
             for col in SEARCH_COLS:
-                subs.append(f"{col} LIKE ?")
-                params.append(f"%{fts_q}%")
+                subs.append(f"{col} LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                params.append(f"%{esc}%")
             clauses.append("(" + " OR ".join(subs) + ")")
-        else:
+        elif search_mode == "fts":
             clauses.append(f"{TABLE_FTS} MATCH ?")
             params.append(fts_q)
+            used_fts = True
+        else:  # "smart"
+            sanitized = _smart_to_fts5(fts_q)
+            if sanitized:
+                clauses.append(f"{TABLE_FTS} MATCH ?")
+                params.append(sanitized)
+                used_fts = True
+            else:
+                # Pure-punctuation query, fall back to literal LIKE.
+                esc = _like_escape(fts_q)
+                subs = []
+                for col in SEARCH_COLS:
+                    subs.append(f"{col} LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                    params.append(f"%{esc}%")
+                clauses.append("(" + " OR ".join(subs) + ")")
 
     for param_name, col_expr in FILTER_COLUMNS.items():
         v = filters.get(param_name)
@@ -259,11 +388,11 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
             clauses.append(f"{col_expr} = ?")
             params.append(v)
 
-    # Tag filter (JSON array contains)
+    # Tag filter (JSON array contains; LIKE-escape the tag value)
     tag = filters.get("tag")
     if tag:
-        clauses.append("v.tags LIKE ?")
-        params.append(f'%"{tag}"%')
+        clauses.append(f"v.tags LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'")
+        params.append(f'%"{_like_escape(tag)}"%')
 
     # Domain exclusion filter (comma-separated list)
     exclude_host = filters.get("exclude_host")
@@ -283,7 +412,68 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
         clauses.append("v.visit_time_utc <= ?")
         params.append(end)
 
-    return (" AND ".join(clauses) or "1=1"), params
+    return (" AND ".join(clauses) or "1=1"), params, used_fts
+
+
+def _safe_int(value, default: int) -> Optional[int]:
+    """Parse an int from request input. Returns None on failure (caller 400s)."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_search_args():
+    """Pull q/mode/sort/sort_dir from request.args with defaults applied."""
+    q = request.args.get("q", "").strip()
+    mode = request.args.get("mode", DEFAULT_SEARCH_MODE)
+    if mode not in SEARCH_MODES:
+        mode = DEFAULT_SEARCH_MODE
+    # Sort defaults to FTS rank when an FTS-capable mode produced a query.
+    is_fts_mode = mode in ("smart", "fts")
+    sort = request.args.get("sort", "rank" if q and is_fts_mode else "time")
+    sort_dir = request.args.get("sort_dir", "desc").upper()
+    if sort_dir not in ("ASC", "DESC"):
+        sort_dir = "DESC"
+    return q, mode, sort, sort_dir
+
+
+def _sort_map(sort_dir: str) -> Dict[str, str]:
+    return {
+        "time": f"v.visit_time_utc {sort_dir}",
+        "host": f"v.dns_host {sort_dir}",
+        "title": f"v.title {sort_dir}",
+        "browser": f"v.browser {sort_dir}",
+        "url": f"v.full_url {sort_dir}",
+        "url_length": f"LENGTH(v.full_url) {sort_dir}",
+        "source": f"v.visit_source {sort_dir}",
+        "transition": f"v.transition_type {sort_dir}",
+        "duration": f"v.visit_duration_ms {sort_dir}",
+        "file_source": f"v.source_db_path {sort_dir}",
+    }
+
+
+def _build_search_sql(filters, q: str, mode: str, sort: str, sort_dir: str):
+    """Build (sql, count_sql, params) for a search query.
+
+    Caller decides whether to add LIMIT/OFFSET.
+    """
+    where, params, used_fts = _build_where(filters, fts_q=q, search_mode=mode)
+    sort_map = _sort_map(sort_dir)
+    if used_fts:
+        order = sort_map.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
+        sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
+               f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
+               f"WHERE {where} ORDER BY {order}")
+        csql = (f"SELECT COUNT(*) FROM {TABLE_FTS} fts "
+                f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid WHERE {where}")
+    else:
+        order = sort_map.get(sort, f"v.visit_time_utc {sort_dir}")
+        sql = f"SELECT v.* FROM {TABLE_VISITS} v WHERE {where} ORDER BY {order}"
+        csql = f"SELECT COUNT(*) FROM {TABLE_VISITS} v WHERE {where}"
+    return sql, csql, params
 
 
 def _get_filters() -> Dict[str, Optional[str]]:
@@ -320,22 +510,23 @@ def index():
 def api_search():
     """Full-text search with filters and pagination.
 
-    Supports three search modes via ?mode= parameter:
-      fts      — FTS5 MATCH (default). Prefix, boolean, column queries.
-      contains — Substring match (LIKE %term%). Matches anywhere in string.
+    Search modes (?mode=):
+      smart    — Default. Sanitizes user input into a safe FTS5 query with
+                 prefix matching. Falls back to LIKE on pure-punctuation
+                 queries.
+      fts      — Raw FTS5 MATCH. Power-user grammar (boolean ops, columns).
+      contains — Substring match (LIKE %term%). Matches anywhere.
       regex    — Python regex (re.search) across URL, title, host, query, tags.
     """
     db = _get_db()
-    q = request.args.get("q", "").strip()
-    mode = request.args.get("mode", "fts")
-    if mode not in ("fts", "contains", "regex"):
-        mode = "fts"
-    limit = min(int(request.args.get("limit", DEFAULT_SEARCH_LIMIT)), MAX_SEARCH_LIMIT)
-    offset = int(request.args.get("offset", 0))
-    sort = request.args.get("sort", "rank" if q and mode == "fts" else "time")
-    sort_dir = request.args.get("sort_dir", "desc").upper()
-    if sort_dir not in ("ASC", "DESC"):
-        sort_dir = "DESC"
+    q, mode, sort, sort_dir = _normalize_search_args()
+
+    limit = _safe_int(request.args.get("limit"), DEFAULT_SEARCH_LIMIT)
+    offset = _safe_int(request.args.get("offset"), 0)
+    if limit is None or offset is None:
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    limit = max(1, min(limit, MAX_SEARCH_LIMIT))
+    offset = max(0, offset)
     f = _get_filters()
 
     # Validate regex before running query
@@ -347,41 +538,23 @@ def api_search():
                             "total": 0, "limit": limit, "offset": 0,
                             "results": []}), 400
 
-    # Build ORDER BY clause
-    SORT_MAP = {
-        "time": f"v.visit_time_utc {sort_dir}",
-        "host": f"v.dns_host {sort_dir}",
-        "title": f"v.title {sort_dir}",
-        "browser": f"v.browser {sort_dir}",
-        "url": f"v.full_url {sort_dir}",
-        "url_length": f"LENGTH(v.full_url) {sort_dir}",
-        "source": f"v.visit_source {sort_dir}",
-        "transition": f"v.transition_type {sort_dir}",
-        "duration": f"v.visit_duration_ms {sort_dir}",
-        "file_source": f"v.source_db_path {sort_dir}",
-    }
+    sql, csql, p = _build_search_sql(f, q, mode, sort, sort_dir)
+    paged_sql = f"{sql} LIMIT ? OFFSET ?"
 
-    use_fts = q and mode == "fts"
-    if use_fts:
-        w, p = _build_where(f, fts_q=q, search_mode="fts")
-        order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
-        sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
-               f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
-               f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
-        csql = (f"SELECT COUNT(*) FROM {TABLE_FTS} fts "
-                f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid WHERE {w}")
-    else:
-        w, p = _build_where(f, fts_q=q if q else "", search_mode=mode)
-        order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
-        sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
-               f"WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?")
-        csql = f"SELECT COUNT(*) FROM {TABLE_VISITS} v WHERE {w}"
+    try:
+        total = db.execute(csql, p).fetchone()[0]
+        cursor = db.execute(paged_sql, p + [limit, offset]).fetchall()
+    except sqlite3.OperationalError as exc:
+        return jsonify({
+            "error": f"search failed: {exc}",
+            "hint": "Try removing punctuation or switch to Contains mode for "
+                    "literal substring search.",
+            "total": 0, "limit": limit, "offset": offset, "results": [],
+        }), 400
 
-    total = db.execute(csql, p).fetchone()[0]
     rows = []
-    for r in db.execute(sql, p + [limit, offset]).fetchall():
+    for r in cursor:
         row = {k: r[k] for k in r.keys()}
-        # Parse tags and unfurl JSON for frontend
         try:
             row["tags"] = json.loads(row.get("tags", "[]"))
         except (json.JSONDecodeError, TypeError):
@@ -408,15 +581,7 @@ CSV_COLUMNS = [
 @app.route("/api/export")
 def api_export():
     """Export search results as CSV. Accepts same params as /api/search."""
-    db = _get_db()
-    q = request.args.get("q", "").strip()
-    mode = request.args.get("mode", "fts")
-    if mode not in ("fts", "contains", "regex"):
-        mode = "fts"
-    sort = request.args.get("sort", "rank" if q and mode == "fts" else "time")
-    sort_dir = request.args.get("sort_dir", "desc").upper()
-    if sort_dir not in ("ASC", "DESC"):
-        sort_dir = "DESC"
+    q, mode, sort, sort_dir = _normalize_search_args()
     f = _get_filters()
 
     if mode == "regex" and q:
@@ -425,31 +590,7 @@ def api_export():
         except re.error as exc:
             return jsonify({"error": f"Invalid regex: {exc}"}), 400
 
-    SORT_MAP = {
-        "time": f"v.visit_time_utc {sort_dir}",
-        "host": f"v.dns_host {sort_dir}",
-        "title": f"v.title {sort_dir}",
-        "browser": f"v.browser {sort_dir}",
-        "url": f"v.full_url {sort_dir}",
-        "url_length": f"LENGTH(v.full_url) {sort_dir}",
-        "source": f"v.visit_source {sort_dir}",
-        "transition": f"v.transition_type {sort_dir}",
-        "duration": f"v.visit_duration_ms {sort_dir}",
-        "file_source": f"v.source_db_path {sort_dir}",
-    }
-
-    use_fts = q and mode == "fts"
-    if use_fts:
-        w, p = _build_where(f, fts_q=q, search_mode="fts")
-        order = SORT_MAP.get(sort, "rank" if sort == "rank" else f"v.visit_time_utc {sort_dir}")
-        sql = (f"SELECT v.* FROM {TABLE_FTS} fts "
-               f"JOIN {TABLE_VISITS} v ON v.id = fts.rowid "
-               f"WHERE {w} ORDER BY {order}")
-    else:
-        w, p = _build_where(f, fts_q=q if q else "", search_mode=mode)
-        order = SORT_MAP.get(sort, f"v.visit_time_utc {sort_dir}")
-        sql = (f"SELECT v.* FROM {TABLE_VISITS} v "
-               f"WHERE {w} ORDER BY {order}")
+    sql, _csql, p = _build_search_sql(f, q, mode, sort, sort_dir)
 
     # Use a dedicated connection for streaming (app context may close before
     # the generator finishes)
@@ -510,22 +651,27 @@ def api_aggregate():
     db = _get_db()
     group_by = request.args.get("group_by", "dns_host")
     metric = request.args.get("metric", "count")
-    limit = min(int(request.args.get("limit", 20)), 200)
+    if group_by not in AGG_GROUP_BY:
+        return jsonify({"error": f"unknown group_by: {group_by}",
+                        "group_by": group_by, "metric": metric, "results": []}), 400
+    if metric not in AGG_METRICS:
+        return jsonify({"error": f"unknown metric: {metric}",
+                        "group_by": group_by, "metric": metric, "results": []}), 400
+    limit = _safe_int(request.args.get("limit"), 20)
+    if limit is None:
+        return jsonify({"error": "limit must be an integer"}), 400
+    limit = max(1, min(limit, 200))
     sort = request.args.get("sort", "desc")
     f = _get_filters()
     q = request.args.get("q", "").strip()
-    search_mode = request.args.get("mode", "fts")
-    if search_mode not in ("fts", "contains", "regex"):
-        search_mode = "fts"
-    use_fts = q and search_mode == "fts"
-    if q:
-        w, p = _build_where(f, fts_q=q, search_mode=search_mode)
-    else:
-        w, p = _build_where(f)
+    search_mode = request.args.get("mode", DEFAULT_SEARCH_MODE)
+    if search_mode not in SEARCH_MODES:
+        search_mode = DEFAULT_SEARCH_MODE
+    w, p, used_fts = _build_where(f, fts_q=q, search_mode=search_mode)
 
     # FTS search requires joining the FTS table
     fts_join = (f"{TABLE_FTS} fts JOIN {TABLE_VISITS} v ON v.id = fts.rowid"
-                if use_fts else f"{TABLE_VISITS} v")
+                if used_fts else f"{TABLE_VISITS} v")
 
     sort_dir = "DESC" if sort == "desc" else "ASC"
 
@@ -561,12 +707,10 @@ def api_aggregate():
                f"WHERE {w} AND v.visit_time_utc != '' "
                f"GROUP BY label ORDER BY label ASC LIMIT ?")
     else:
-        # Standard column grouping
-        col = f"v.{group_by}" if group_by in (
-            "dns_host", "browser", "os_platform", "os_username",
-            "browser_profile", "endpoint_name", "visit_source",
-            "transition_type", "browser_engine", "title",
-        ) else "v.dns_host"
+        # Standard column grouping. group_by is already validated against
+        # AGG_GROUP_BY above, and the tags/time_* members are handled in the
+        # branches above, so anything reaching here is a plain visits column.
+        col = f"v.{group_by}"
 
         if metric == "unique_urls":
             select = f"{col} AS label, COUNT(DISTINCT v.full_url) AS count"
@@ -578,8 +722,13 @@ def api_aggregate():
         sql = (f"SELECT {select} FROM {fts_join} "
                f"WHERE {w} GROUP BY label ORDER BY count {sort_dir} LIMIT ?")
 
-    rows = [{"label": r["label"], "count": r["count"]}
-            for r in db.execute(sql, p + [limit]).fetchall()]
+    try:
+        rows = [{"label": r["label"], "count": r["count"]}
+                for r in db.execute(sql, p + [limit]).fetchall()]
+    except sqlite3.OperationalError as exc:
+        return jsonify({"error": f"aggregate failed: {exc}",
+                        "group_by": group_by, "metric": metric,
+                        "results": []}), 400
 
     return jsonify({"group_by": group_by, "metric": metric, "results": rows})
 
@@ -619,19 +768,18 @@ def api_heatmap():
     db = _get_db()
     f = _get_filters()
     q = request.args.get("q", "").strip()
-    use_fts = bool(q)
-    if q:
-        w, p = _build_where(f, fts_q=q, search_mode="fts")
-    else:
-        w, p = _build_where(f)
+    w, p, used_fts = _build_where(f, fts_q=q, search_mode=DEFAULT_SEARCH_MODE)
     fts_join = (f"{TABLE_FTS} fts JOIN {TABLE_VISITS} v ON v.id = fts.rowid"
-                if use_fts else f"{TABLE_VISITS} v")
-    rows = db.execute(
-        f"SELECT CAST(strftime('%w', v.visit_time_utc) AS INT) AS dow, "
-        f"CAST(strftime('%H', v.visit_time_utc) AS INT) AS hour, "
-        f"COUNT(*) AS count FROM {fts_join} "
-        f"WHERE {w} AND v.visit_time_utc != '' GROUP BY dow, hour", p
-    ).fetchall()
+                if used_fts else f"{TABLE_VISITS} v")
+    try:
+        rows = db.execute(
+            f"SELECT CAST(strftime('%w', v.visit_time_utc) AS INT) AS dow, "
+            f"CAST(strftime('%H', v.visit_time_utc) AS INT) AS hour, "
+            f"COUNT(*) AS count FROM {fts_join} "
+            f"WHERE {w} AND v.visit_time_utc != '' GROUP BY dow, hour", p
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        return jsonify({"error": f"heatmap failed: {exc}", "cells": []}), 400
     return jsonify({"cells": [dict(r) for r in rows]})
 
 
@@ -695,7 +843,7 @@ def api_sources():
 
 
 @app.route("/api/sources/delete", methods=["POST"])
-@require_token
+@require_local
 def api_sources_delete():
     """Delete visits from selected sources by ingest_log IDs."""
     body = request.get_json(silent=True) or {}
@@ -734,7 +882,7 @@ def api_sources_delete():
 
 
 @app.route("/api/clear", methods=["POST"])
-@require_token
+@require_local
 def api_clear():
     """Wipe all visit data and ingest log, keeping schema intact."""
     db = _get_db()
@@ -746,12 +894,17 @@ def api_clear():
 
 
 @app.route("/api/ingest", methods=["POST"])
-@require_token
+@require_local
 def api_ingest():
     """Accept archive/directory path and run the full pipeline."""
     body = request.get_json(silent=True) or {}
     path_str = body.get("path", "")
     clear_first = body.get("clear", False)
+    raw_passwords = body.get("passwords") or []
+    if not isinstance(raw_passwords, list):
+        return jsonify({"error": "passwords must be a JSON array"}), 400
+    passwords = [str(p) for p in raw_passwords if isinstance(p, (str, int))]
+
     if not path_str:
         return jsonify({"error": "path required"}), 400
 
@@ -766,12 +919,18 @@ def api_ingest():
         db.commit()
         rebuild_fts(g.db_path)
 
-    stats = run_pipeline(g.db_path, target)
+    stats = run_pipeline(g.db_path, target, passwords=passwords)
+    # Guarantee a consistent, searchable FTS index after a bulk ingest. Inserts
+    # go through the auto-sync triggers, but an explicit rebuild removes the
+    # "search silently returns nothing" failure class (e.g. carve path, or a
+    # pre-existing visits table restored without its FTS shadow).
+    rebuild_fts(g.db_path)
+    stats["fts_rows"] = fts_row_count(g.db_path)
     return jsonify(stats)
 
 
 @app.route("/api/reingest", methods=["POST"])
-@require_token
+@require_local
 def api_reingest():
     """Re-run classification (Stage 3) and rebuild FTS index."""
     db = _get_db()
@@ -798,7 +957,7 @@ def api_reingest():
 
 
 @app.route("/api/rebuild-fts", methods=["POST"])
-@require_token
+@require_local
 def api_rebuild_fts():
     """Rebuild the FTS5 index."""
     rebuild_fts(g.db_path)
@@ -816,10 +975,16 @@ def main():
     p.add_argument("--db", default="history_index.db")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--no-auth", action="store_true",
-                   help="Disable API token requirement (NOT recommended)")
+    p.add_argument("--allow-remote", action="store_true",
+                   help="Allow non-loopback requests to mutating endpoints. "
+                        "Only use behind a reverse proxy that adds auth.")
     p.add_argument("--browse-root", action="append", default=[],
-                   help="Restrict /api/browse to these directories (repeatable)")
+                   help="Restrict /api/browse to these directories (repeatable). "
+                        "Defaults to the current working directory.")
+    p.add_argument("--archive-password", action="append", default=[],
+                   dest="archive_passwords",
+                   help="Password to try when extracting encrypted archives. "
+                        "Repeat for multiple passwords; tried in order.")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -828,26 +993,25 @@ def main():
     )
 
     # Security setup
-    global API_TOKEN, BROWSE_ROOTS
-    if not args.no_auth:
-        API_TOKEN = secrets.token_urlsafe(32)
-        LOG.info("=" * 60)
-        LOG.info("API Token (required for POST endpoints):")
-        LOG.info("  %s", API_TOKEN)
-        LOG.info("Pass via X-API-Token header or ?token= query param")
-        LOG.info("=" * 60)
-    else:
-        API_TOKEN = None
-        LOG.warning("Auth disabled (--no-auth). Mutating endpoints are UNPROTECTED.")
+    global ALLOW_REMOTE, BROWSE_ROOTS
+    ALLOW_REMOTE = bool(args.allow_remote)
 
     if args.browse_root:
         BROWSE_ROOTS = [Path(r).resolve() for r in args.browse_root]
         LOG.info("Browse restricted to: %s", [str(r) for r in BROWSE_ROOTS])
     else:
-        LOG.warning("No --browse-root set. /api/browse can access entire filesystem.")
+        BROWSE_ROOTS = [Path.cwd().resolve()]
+        LOG.info("Browse restricted to CWD: %s (override with --browse-root)",
+                 BROWSE_ROOTS[0])
 
-    if args.host != "127.0.0.1":
-        LOG.warning("Binding to %s — server exposed on network!", args.host)
+    is_loopback_host = args.host in ("127.0.0.1", "::1", "localhost")
+    if not is_loopback_host:
+        if ALLOW_REMOTE:
+            LOG.warning("Binding to %s with --allow-remote. Put a reverse "
+                        "proxy with auth in front of this server.", args.host)
+        else:
+            LOG.warning("Binding to %s but mutating endpoints reject non-loopback "
+                        "requests. Pass --allow-remote to override.", args.host)
 
     db_path = os.path.abspath(args.db)
 
@@ -861,9 +1025,12 @@ def main():
         if not src.exists():
             LOG.error("Not found: %s", src)
             return
-        stats = run_pipeline(db_path, src)
+        stats = run_pipeline(db_path, src, passwords=args.archive_passwords)
         LOG.info("Done: %d DB(s), %d new rows",
                  stats["databases_found"], stats["total_new_rows"])
+        for fail in stats.get("extraction_failures", []):
+            LOG.warning("Extraction failed [%s]: %s — %s",
+                        fail["reason"], fail["archive"], fail["detail"])
 
     @app.before_request
     def _inject_db_path():

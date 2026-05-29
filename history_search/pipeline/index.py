@@ -193,3 +193,14 @@ def get_visit_count(db_path: str) -> int:
             return conn.execute(f"SELECT COUNT(*) FROM {TABLE_VISITS}").fetchone()[0]
     except sqlite3.Error:
         return 0
+
+
+def fts_row_count(db_path: str) -> int:
+    """Rows currently in the FTS5 index. Diagnostic for 'search returns nothing':
+    if this is 0 while get_visit_count() is non-zero, the index is stale and a
+    rebuild_fts() is needed."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM {TABLE_FTS}").fetchone()[0]
+    except sqlite3.Error:
+        return 0

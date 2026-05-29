@@ -33,6 +33,55 @@ LOG = logging.getLogger("history_search.extract")
 
 ARCHIVE_EXTENSIONS = {".7z", ".zip", ".tgz", ".tar", ".gz", ".rar"}
 
+
+# ---------------------------------------------------------------------------
+# Extraction failure tracking
+# ---------------------------------------------------------------------------
+
+# Reasons a single archive can fail to extract, surfaced to the caller so the
+# server can return them in /api/ingest responses.
+FAIL_PASSWORD = "password_required"
+FAIL_UNSUPPORTED = "unsupported_format"
+FAIL_TRAVERSAL = "path_traversal"
+FAIL_SIZE_LIMIT = "extraction_size_limit"
+FAIL_UNKNOWN = "unknown"
+
+
+class ExtractionResult:
+    """Aggregated outcome of an extraction run."""
+
+    def __init__(self):
+        self.failures: List[dict] = []
+
+    def record(self, archive: Path, reason: str, detail: str = "") -> None:
+        self.failures.append({
+            "archive": str(archive),
+            "reason": reason,
+            "detail": detail,
+        })
+
+    def needs_password(self) -> bool:
+        return any(f["reason"] == FAIL_PASSWORD for f in self.failures)
+
+
+def _resolve_passwords(user_passwords: Optional[List[str]]) -> List[str]:
+    """Build attempt order: user-supplied passwords first, then defaults.
+
+    The empty password is always tried first so unencrypted archives are not
+    slowed down by three failed decryption attempts.
+    """
+    seen: set = set()
+    out: List[str] = []
+    # Always start with the empty password.
+    out.append("")
+    seen.add("")
+    for src in (user_passwords or [], ARCHIVE_PASSWORDS):
+        for p in src:
+            if p not in seen:
+                out.append(p)
+                seen.add(p)
+    return out
+
 # Magic byte signatures for archive detection (offset, bytes)
 _MAGIC_SIGNATURES = {
     "zip":   (0, b"PK\x03\x04"),
@@ -210,9 +259,24 @@ def _check_path_traversal(archive_path: Path, output_dir: Path) -> bool:
 # Pure-Python extractors (stdlib)
 # ---------------------------------------------------------------------------
 
-def _try_extract_zip_python(archive_path: Path, dest: Path) -> bool:
+# Each `_try_extract_*` returns one of:
+#   "ok"             — extraction succeeded
+#   "password"       — archive is encrypted and no supplied password worked
+#   "unsupported"    — handler does not support this archive (fall through)
+#   "error"          — handler threw an unexpected error
+
+def _is_password_error(exc: BaseException) -> bool:
+    """Heuristic: did this exception come from an encrypted-archive path?"""
+    msg = str(exc).lower()
+    needles = ("password", "encrypted", "decrypt", "crc")
+    return any(n in msg for n in needles)
+
+
+def _try_extract_zip_python(archive_path: Path, dest: Path,
+                            passwords: List[str]) -> str:
     """Extract zip using stdlib zipfile with password support."""
-    for password in ARCHIVE_PASSWORDS:
+    saw_password_error = False
+    for password in passwords:
         try:
             with zipfile.ZipFile(archive_path, "r") as zf:
                 pwd = password.encode("utf-8") if password else None
@@ -220,116 +284,197 @@ def _try_extract_zip_python(archive_path: Path, dest: Path) -> bool:
                     if not _is_path_safe(member.filename):
                         continue
                     zf.extract(member, dest, pwd=pwd)
-                return True
-        except (RuntimeError, zipfile.BadZipFile):
-            # RuntimeError for bad password or unsupported compression
+                return "ok"
+        except RuntimeError as e:
+            # zipfile raises RuntimeError for bad password ("Bad password ...")
+            # and for unsupported compression. Treat as password issue.
+            saw_password_error = True
+            LOG.debug("zip password attempt failed for %s: %s", archive_path, e)
             continue
+        except zipfile.BadZipFile:
+            return "unsupported"
         except Exception as e:
+            if _is_password_error(e):
+                saw_password_error = True
+                continue
             LOG.debug("zipfile failed for %s: %s", archive_path, e)
-            continue
-    return False
+            return "error"
+    return "password" if saw_password_error else "error"
 
 
-def _try_extract_tar_python(archive_path: Path, dest: Path) -> bool:
-    """Extract tar/tar.gz/tar.bz2 using stdlib tarfile."""
+def _try_extract_tar_python(archive_path: Path, dest: Path,
+                            passwords: List[str]) -> str:
+    """Extract tar/tar.gz/tar.bz2 using stdlib tarfile (no password support)."""
     try:
         with tarfile.open(archive_path, "r:*") as tf:
             safe_members = [m for m in tf.getmembers() if _is_path_safe(m.name)]
             tf.extractall(dest, members=safe_members)
-        return True
-    except (tarfile.TarError, Exception) as e:
+        return "ok"
+    except tarfile.TarError as e:
         LOG.debug("tarfile failed for %s: %s", archive_path, e)
-        return False
+        return "unsupported"
+    except Exception as e:
+        LOG.debug("tarfile failed for %s: %s", archive_path, e)
+        return "error"
 
 
-def _try_extract_7z_python(archive_path: Path, dest: Path) -> bool:
+def _try_extract_7z_python(archive_path: Path, dest: Path,
+                           passwords: List[str]) -> str:
     """Extract .7z using py7zr (optional dependency)."""
     py7zr = _get_py7zr()
     if py7zr is None:
-        return False
-    for password in ARCHIVE_PASSWORDS:
+        return "unsupported"
+    saw_password_error = False
+    for password in passwords:
         try:
             pwd = password if password else None
             with py7zr.SevenZipFile(archive_path, "r", password=pwd) as sz:
                 sz.extractall(path=dest)
-            return True
-        except Exception:
+            return "ok"
+        except Exception as e:
+            if _is_password_error(e):
+                saw_password_error = True
+                continue
+            LOG.debug("py7zr failed for %s: %s", archive_path, e)
             continue
-    return False
+    return "password" if saw_password_error else "error"
 
 
-def _try_extract_rar_python(archive_path: Path, dest: Path) -> bool:
+def _try_extract_rar_python(archive_path: Path, dest: Path,
+                            passwords: List[str]) -> str:
     """Extract .rar using rarfile (optional dependency)."""
     rf = _get_rarfile()
     if rf is None:
-        return False
-    for password in ARCHIVE_PASSWORDS:
+        return "unsupported"
+    saw_password_error = False
+    for password in passwords:
         try:
             with rf.RarFile(archive_path, "r") as rar:
                 pwd = password if password else None
                 rar.extractall(dest, pwd=pwd)
-            return True
-        except Exception:
+            return "ok"
+        except Exception as e:
+            if _is_password_error(e):
+                saw_password_error = True
+                continue
+            LOG.debug("rarfile failed for %s: %s", archive_path, e)
             continue
-    return False
+    return "password" if saw_password_error else "error"
 
 
 # ---------------------------------------------------------------------------
 # CLI-based extractors (fallback)
 # ---------------------------------------------------------------------------
 
-def _try_extract_7z_cli(archive_path: Path, dest: Path) -> bool:
+# 7z exit codes:
+#   0 = success, 1 = warning, 2 = fatal, 7 = command line error,
+#   8 = not enough memory, 255 = user stopped. We treat 0/1 as success.
+_SEVENZIP_OK_RETURNCODES = {0, 1}
+_PASSWORD_KEYWORDS = (b"password", b"wrong password", b"data error",
+                      b"encrypted", b"cannot open")
+
+
+def _seven_zip_returncode_means_password(stderr: bytes, stdout: bytes) -> bool:
+    blob = (stderr + stdout).lower()
+    return any(kw in blob for kw in _PASSWORD_KEYWORDS)
+
+
+def _try_extract_7z_cli(archive_path: Path, dest: Path,
+                        passwords: List[str]) -> str:
     """Try extracting with 7z CLI using password list."""
-    for password in ARCHIVE_PASSWORDS:
+    if not _has_7z_cli():
+        return "unsupported"
+    saw_password_error = False
+    for password in passwords:
         try:
-            cmd = ["7z", "x", f"-o{dest}", "-y", str(archive_path)]
+            cmd = ["7z", "x", f"-o{dest}", "-y"]
             if password:
-                cmd.insert(2, f"-p{password}")
+                cmd.append(f"-p{password}")
+            else:
+                # Tell 7z to not prompt; treat missing password as failure.
+                cmd.append("-p-")
+            cmd.append(str(archive_path))
             result = subprocess.run(cmd, capture_output=True, timeout=600)
-            if result.returncode == 0:
-                return True
+            if result.returncode in _SEVENZIP_OK_RETURNCODES:
+                return "ok"
+            if _seven_zip_returncode_means_password(result.stderr, result.stdout):
+                saw_password_error = True
+                continue
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
-    return False
+    return "password" if saw_password_error else "error"
 
 
-def _try_extract_zip_cli(archive_path: Path, dest: Path) -> bool:
+def _try_extract_zip_cli(archive_path: Path, dest: Path,
+                         passwords: List[str]) -> str:
     """Try extracting zip with unzip CLI."""
-    for password in ARCHIVE_PASSWORDS:
+    if shutil.which("unzip") is None:
+        return "unsupported"
+    saw_password_error = False
+    for password in passwords:
         try:
-            cmd = ["unzip", "-o", str(archive_path), "-d", str(dest)]
+            cmd = ["unzip", "-o"]
             if password:
-                cmd.insert(2, "-P")
-                cmd.insert(3, password)
+                cmd += ["-P", password]
+            cmd += [str(archive_path), "-d", str(dest)]
             result = subprocess.run(cmd, capture_output=True, timeout=600)
             if result.returncode == 0:
-                return True
+                return "ok"
+            # unzip exits 82 on incorrect password, 81 on wrong-method
+            if result.returncode in (81, 82):
+                saw_password_error = True
+                continue
+            blob = (result.stderr + result.stdout).lower()
+            if b"password" in blob or b"incorrect" in blob:
+                saw_password_error = True
+                continue
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
-    return False
+    return "password" if saw_password_error else "error"
 
 
-def _try_extract_tar_cli(archive_path: Path, dest: Path) -> bool:
-    """Extract tar archives via CLI."""
+def _try_extract_tar_cli(archive_path: Path, dest: Path,
+                         passwords: List[str]) -> str:
+    """Extract tar archives via CLI (no password support)."""
+    if shutil.which("tar") is None:
+        return "unsupported"
     try:
         result = subprocess.run(
             ["tar", "xf", str(archive_path), "-C", str(dest)],
             capture_output=True, timeout=600
         )
-        return result.returncode == 0
+        return "ok" if result.returncode == 0 else "error"
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+        return "error"
 
 
 # ---------------------------------------------------------------------------
 # Dispatch: try Python first, fall back to CLI
 # ---------------------------------------------------------------------------
 
-def _extract_single(archive_path: Path, dest: Path) -> bool:
+def _combine(*results: str) -> str:
+    """Reduce a list of extractor outcomes to one final result.
+
+    Priority: ok > password > error > unsupported. So if any handler can
+    actually extract, "ok" wins; if any handler tells us the archive is
+    encrypted, surface that over a generic "error".
+    """
+    order = {"ok": 0, "password": 1, "error": 2, "unsupported": 3}
+    best = "unsupported"
+    for r in results:
+        if order[r] < order[best]:
+            best = r
+    return best
+
+
+def _extract_single(archive_path: Path, dest: Path,
+                    passwords: List[str]) -> str:
     """Extract a single archive file to the destination directory.
 
     Uses magic-byte detection to choose the correct extractor regardless of
-    file extension.  Strategy: pure-Python first (portable), CLI fallback.
+    file extension. Strategy: pure-Python first (portable), CLI fallback.
+
+    Returns one of: "ok", "password", "error", "unsupported".
     """
     dest.mkdir(parents=True, exist_ok=True)
     archive_type = _detect_archive_type(archive_path)
@@ -337,42 +482,53 @@ def _extract_single(archive_path: Path, dest: Path) -> bool:
     LOG.debug("Magic-byte detection for %s: %s", archive_path.name, archive_type or "unknown")
 
     if archive_type == "zip":
-        if _try_extract_zip_python(archive_path, dest):
-            return True
-        # AES-encrypted zips need CLI
-        if _try_extract_zip_cli(archive_path, dest):
-            return True
-        return _try_extract_7z_cli(archive_path, dest)
+        results = []
+        for fn in (_try_extract_zip_python, _try_extract_zip_cli, _try_extract_7z_cli):
+            r = fn(archive_path, dest, passwords)
+            if r == "ok":
+                return "ok"
+            results.append(r)
+        return _combine(*results)
 
     elif archive_type in ("tar", "gzip", "bzip2", "xz"):
-        if _try_extract_tar_python(archive_path, dest):
-            return True
-        if _try_extract_tar_cli(archive_path, dest):
-            return True
-        return _try_extract_7z_cli(archive_path, dest)
+        results = []
+        for fn in (_try_extract_tar_python, _try_extract_tar_cli, _try_extract_7z_cli):
+            r = fn(archive_path, dest, passwords)
+            if r == "ok":
+                return "ok"
+            results.append(r)
+        return _combine(*results)
 
     elif archive_type == "7z":
-        if _try_extract_7z_python(archive_path, dest):
-            return True
-        return _try_extract_7z_cli(archive_path, dest)
+        results = []
+        for fn in (_try_extract_7z_python, _try_extract_7z_cli):
+            r = fn(archive_path, dest, passwords)
+            if r == "ok":
+                return "ok"
+            results.append(r)
+        return _combine(*results)
 
     elif archive_type == "rar":
-        if _try_extract_rar_python(archive_path, dest):
-            return True
-        return _try_extract_7z_cli(archive_path, dest)
+        results = []
+        for fn in (_try_extract_rar_python, _try_extract_7z_cli):
+            r = fn(archive_path, dest, passwords)
+            if r == "ok":
+                return "ok"
+            results.append(r)
+        return _combine(*results)
 
     else:
-        # Magic bytes didn't match — try everything as last resort
+        # Magic bytes didn't match — try everything as last resort.
         LOG.debug("No magic match for %s, trying all extractors", archive_path.name)
-        if _try_extract_zip_python(archive_path, dest):
-            return True
-        if _try_extract_tar_python(archive_path, dest):
-            return True
-        if _try_extract_7z_python(archive_path, dest):
-            return True
-        if _try_extract_rar_python(archive_path, dest):
-            return True
-        return _try_extract_7z_cli(archive_path, dest)
+        results = []
+        for fn in (_try_extract_zip_python, _try_extract_tar_python,
+                   _try_extract_7z_python, _try_extract_rar_python,
+                   _try_extract_7z_cli):
+            r = fn(archive_path, dest, passwords)
+            if r == "ok":
+                return "ok"
+            results.append(r)
+        return _combine(*results)
 
 
 def _check_extraction_size(dest: Path) -> bool:
@@ -390,7 +546,9 @@ def extract_recursive(
     provenance: str = "",
     depth: int = 0,
     on_progress: Optional[Callable[[str], None]] = None,
-) -> Path:
+    passwords: Optional[List[str]] = None,
+    result: Optional[ExtractionResult] = None,
+) -> ExtractionResult:
     """Recursively extract archives, handling nested containers.
 
     Args:
@@ -399,13 +557,21 @@ def extract_recursive(
         provenance: Parent provenance chain string.
         depth: Current nesting depth (for safety limit).
         on_progress: Optional callback for progress reporting.
+        passwords: User-supplied archive passwords to try before defaults.
+        result: Optional ExtractionResult to accumulate failures into.
 
     Returns:
-        The root extraction directory.
+        ExtractionResult with .failures populated for any archive that could
+        not be extracted. The destination directory contains whatever was
+        successfully extracted regardless of failures.
     """
+    if result is None:
+        result = ExtractionResult()
+    pw_list = _resolve_passwords(passwords)
+
     if depth > MAX_NESTING_DEPTH:
         LOG.warning("Max nesting depth %d reached at %s", MAX_NESTING_DEPTH, archive_path)
-        return dest
+        return result
 
     archive_path = archive_path.resolve()
     chain = f"{provenance} > {archive_path.name}" if provenance else archive_path.name
@@ -416,14 +582,33 @@ def extract_recursive(
     LOG.info("Extracting [depth=%d]: %s", depth, archive_path.name)
 
     if not _check_path_traversal(archive_path, dest):
-        return dest
+        result.record(archive_path, FAIL_TRAVERSAL,
+                      "archive contains path-traversal entries")
+        return result
 
-    if not _extract_single(archive_path, dest):
+    outcome = _extract_single(archive_path, dest, pw_list)
+    if outcome == "password":
+        LOG.warning("Password required: %s", archive_path)
+        result.record(archive_path, FAIL_PASSWORD,
+                      "archive is encrypted; supply --archive-password "
+                      "(or the Passwords field in the SPA Ingest panel)")
+        if on_progress:
+            on_progress(f"  password required: {archive_path.name}")
+        return result
+    if outcome == "unsupported":
+        LOG.warning("Unsupported format: %s", archive_path)
+        result.record(archive_path, FAIL_UNSUPPORTED,
+                      "no available extractor recognized this archive format")
+        return result
+    if outcome != "ok":
         LOG.warning("Failed to extract: %s", archive_path)
-        return dest
+        result.record(archive_path, FAIL_UNKNOWN, "extraction failed")
+        return result
 
     if not _check_extraction_size(dest):
-        return dest
+        result.record(archive_path, FAIL_SIZE_LIMIT,
+                      "extraction exceeded MAX_EXTRACTED_SIZE_BYTES")
+        return result
 
     # Recurse into nested archives
     for child in sorted(dest.rglob("*")):
@@ -432,12 +617,14 @@ def extract_recursive(
         if _is_archive(child):
             nested_dest = child.parent / (child.stem + "_extracted")
             try:
-                extract_recursive(child, nested_dest, chain, depth + 1, on_progress)
+                extract_recursive(child, nested_dest, chain, depth + 1,
+                                  on_progress, pw_list, result)
                 LOG.info("  nested: %s", child.name)
             except Exception as e:
                 LOG.warning("  nested extract failed %s: %s", child.name, e)
+                result.record(child, FAIL_UNKNOWN, str(e))
 
-    return dest
+    return result
 
 
 def discover_files(root: Path, provenance_base: str = "") -> List[ExtractedFile]:

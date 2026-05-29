@@ -51,13 +51,24 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _probe_engine(conn: sqlite3.Connection) -> Optional[str]:
-    """Probe which browser engine schema this database uses."""
+    """Probe which browser engine schema this database uses.
+
+    For WebKit/Safari, require BOTH `history_items` and `history_visits`. The
+    base SCHEMA_PROBES entry only checks `history_items`, but extraction
+    needs the join with `history_visits`; partial DBs with only items present
+    would otherwise probe as webkit and then silently fail in extract_webkit.
+    """
     for engine, sql in SCHEMA_PROBES.items():
         try:
             conn.execute(sql)
-            return engine
         except sqlite3.Error:
             continue
+        if engine == "webkit":
+            if not _has_table(conn, "history_visits"):
+                LOG.warning("DB has history_items but no history_visits table; "
+                            "skipping (likely a partial Safari extract)")
+                continue
+        return engine
     return None
 
 
@@ -203,6 +214,27 @@ def decode_chrome_transition(raw: int) -> Tuple[str, str]:
 # Browser extractors — per-visit rows
 # ---------------------------------------------------------------------------
 
+def _resolve_referrer_urls(records: List[VisitRecord]) -> int:
+    """Second pass: resolve raw_from_visit (an originating visit id) into the
+    referrer URL, reconstructing *how the user reached each page*.
+
+    Chromium `visits.from_visit`, Gecko `moz_historyvisits.from_visit`, and
+    Safari `history_visits.redirect_source` all reference a sibling visit's id
+    within the same DB, so one resolver serves every engine. Returns the number
+    of records that gained a referrer (for logging).
+    """
+    id_to_url = {r.raw_visit_id: r.full_url
+                 for r in records if r.raw_visit_id and r.full_url}
+    resolved = 0
+    for r in records:
+        if r.raw_from_visit:
+            ref = id_to_url.get(r.raw_from_visit, "")
+            if ref:
+                r.from_visit_url = ref
+                resolved += 1
+    return resolved
+
+
 def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance: str) -> List[VisitRecord]:
     """Extract per-visit records from a Chromium-engine database."""
     has_visit_source_table = _has_table(conn, "visit_source")
@@ -285,6 +317,9 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
     except sqlite3.Error as e:
         LOG.warning("Chromium extraction error: %s", e)
 
+    n = _resolve_referrer_urls(records)
+    if n:
+        LOG.info("Chromium: resolved %d referrer link(s)", n)
     return records
 
 
@@ -389,15 +424,31 @@ def extract_gecko(conn: sqlite3.Connection, meta: SourceMetadata, provenance: st
         except sqlite3.Error:
             pass
 
+    _resolve_referrer_urls(records)
     return records
 
 
 def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: str) -> List[VisitRecord]:
-    """Extract per-visit records from a Safari/WebKit database."""
+    """Extract per-visit records from a Safari/WebKit database.
+
+    Schema notes:
+    - `history_items(id, url, ...)` — distinct URLs.
+    - `history_visits(id, history_item, visit_time, ...)` — per-visit rows.
+    - `history_tombstones` — present when iCloud sync is enabled. Its presence
+      alone does not mean a given visit is synced; tombstones record visits
+      DELETED on other devices.
+    - `history_visits.origin` (Safari 17+ish) is the sync-direction indicator.
+    """
+    if not _has_table(conn, "history_items"):
+        LOG.warning("Safari DB missing history_items; cannot extract")
+        return []
+    if not _has_table(conn, "history_visits"):
+        LOG.warning("Safari DB missing history_visits; cannot extract")
+        return []
+
     has_origin = _has_column(conn, "history_visits", "origin")
     has_redirect_src = _has_column(conn, "history_visits", "redirect_source")
     has_redirect_dst = _has_column(conn, "history_visits", "redirect_destination")
-    has_score = _has_column(conn, "history_visits", "score")
     has_tombstones = _has_table(conn, "history_tombstones")
 
     cols = [
@@ -406,18 +457,11 @@ def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: s
         "history_visits.visit_time",
         "history_visits.id AS visit_id",
     ]
-    if has_redirect_src:
-        cols.append("history_visits.redirect_source")
-    else:
-        cols.append("NULL AS redirect_source")
-    if has_redirect_dst:
-        cols.append("history_visits.redirect_destination")
-    else:
-        cols.append("NULL AS redirect_destination")
-    if has_origin:
-        cols.append("history_visits.origin")
-    else:
-        cols.append("0 AS origin")
+    cols.append("history_visits.redirect_source" if has_redirect_src
+                else "NULL AS redirect_source")
+    cols.append("history_visits.redirect_destination" if has_redirect_dst
+                else "NULL AS redirect_destination")
+    cols.append("history_visits.origin" if has_origin else "0 AS origin")
 
     sql = (
         f"SELECT {', '.join(cols)} "
@@ -426,42 +470,59 @@ def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: s
         f"ORDER BY history_visits.visit_time DESC"
     )
 
-    records = []
+    records: List[VisitRecord] = []
+    skipped_empty = 0
     try:
-        for row in conn.execute(sql).fetchall():
-            url, title, visit_time, visit_id, redirect_src, redirect_dst, origin_val = row
-
-            ts = _safari_time_to_utc(visit_time or 0)
-
-            # Sync detection heuristic
-            if has_origin and origin_val and int(origin_val) != 0:
-                source = "synced"
-                confidence = "likely"
-            elif has_tombstones:
-                source = "unknown"
-                confidence = "unknown"
-            else:
-                source = "local"
-                confidence = "confirmed"
-
-            records.append(VisitRecord(
-                provenance_chain=provenance,
-                source_db_path=str(meta.browser_profile),
-                os_platform=meta.os_platform,
-                browser=meta.browser,
-                browser_engine=meta.browser_engine,
-                browser_profile=meta.browser_profile,
-                os_username=meta.os_username,
-                endpoint_name=meta.endpoint_name,
-                visit_time_utc=ts,
-                full_url=url or "",
-                title=title or "",
-                visit_source=source,
-                visit_source_confidence=confidence,
-                raw_visit_id=visit_id or 0,
-            ))
+        cursor = conn.execute(sql)
     except sqlite3.Error as e:
-        LOG.warning("WebKit extraction error: %s", e)
+        LOG.error("WebKit query failed against %s: %s", meta.browser_profile, e)
+        return []
+
+    for row in cursor.fetchall():
+        url, title, visit_time, visit_id, redirect_src, redirect_dst, origin_val = row
+
+        # Drop empty-URL records: extraction artifacts that should never appear
+        # in the index (would confuse search and forensic reporting).
+        if not url:
+            skipped_empty += 1
+            continue
+
+        ts = _safari_time_to_utc(visit_time if visit_time is not None else 0)
+
+        # Sync detection.
+        # - Non-zero origin: confirmed sync direction signal (Safari 17+).
+        # - has_tombstones tells us iCloud sync is configured for the device
+        #   but not whether THIS visit came from sync. Treat as "likely local".
+        if has_origin and origin_val and int(origin_val) != 0:
+            source, confidence = "synced", "likely"
+        elif has_tombstones:
+            source, confidence = "local", "likely"
+        else:
+            source, confidence = "local", "confirmed"
+
+        records.append(VisitRecord(
+            provenance_chain=provenance,
+            source_db_path=str(meta.browser_profile),
+            os_platform=meta.os_platform,
+            browser=meta.browser,
+            browser_engine=meta.browser_engine,
+            browser_profile=meta.browser_profile,
+            os_username=meta.os_username,
+            endpoint_name=meta.endpoint_name,
+            visit_time_utc=ts,
+            full_url=url,
+            title=title or "",
+            visit_source=source,
+            visit_source_confidence=confidence,
+            raw_from_visit=int(redirect_src) if redirect_src else 0,
+            raw_visit_id=visit_id or 0,
+        ))
+
+    if skipped_empty:
+        LOG.info("Safari: skipped %d row(s) with empty URL", skipped_empty)
+    n = _resolve_referrer_urls(records)
+    LOG.info("Safari: extracted %d visit(s) (%d via redirect) from %s",
+             len(records), n, meta.browser_profile or "unknown profile")
 
     return records
 
