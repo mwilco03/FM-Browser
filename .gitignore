@@ -8,3 +8,15 @@ build/
 .eggs/
 *.tmp
 .env
+
+# Claude Code project memory (lives on the shared mount, not project source)
+.claude-memory/
+
+# Forensic acquisition archives / evidence — never commit (may contain PII)
+*.7z
+*.zip
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2

@@ -86,6 +86,37 @@ class TestIndex(unittest.TestCase):
         # Should not raise
         rebuild_fts(self.db_path)
 
+    def test_source_db_path_matches_ingest_log_for_sources_join(self):
+        # Regression for UA-1/B-1: extractors leave source_db_path unset; insert_visits
+        # must overwrite it from source_db so /api/sources (which joins
+        # visits.source_db_path = ingest_log.source_db) reports live rows and
+        # delete-by-source actually removes them instead of orphaning visits.
+        real_path = "/evidence/Users/jdoe/Chrome/History"
+        records = [
+            VisitRecord(full_url="https://a.example/1", dns_host="a.example"),
+            VisitRecord(full_url="https://b.example/2", dns_host="b.example"),
+        ]
+        # Post-extractor state: source_db_path is unset (a profile string here would
+        # be the bug). insert_visits is the single home that fills it.
+        self.assertTrue(all(r.source_db_path == "" for r in records))
+        insert_visits(self.db_path, records, source_db=real_path,
+                      meta_browser="chrome", meta_platform="windows")
+
+        with sqlite3.connect(self.db_path) as conn:
+            paths = [r[0] for r in conn.execute(
+                "SELECT DISTINCT source_db_path FROM visits").fetchall()]
+            self.assertEqual(paths, [real_path])
+            # The /api/sources join now reports live rows (was 0 before the fix).
+            live = conn.execute(
+                "SELECT COUNT(v.id) FROM ingest_log il "
+                "LEFT JOIN visits v ON v.source_db_path = il.source_db GROUP BY il.id"
+            ).fetchone()[0]
+            self.assertEqual(live, 2)
+            # delete-by-source removes the visits (no orphans left behind).
+            deleted = conn.execute(
+                "DELETE FROM visits WHERE source_db_path = ?", (real_path,)).rowcount
+            self.assertEqual(deleted, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -147,6 +147,13 @@ def run_tests():
 
         app.config["TESTING"] = True
         client = app.test_client()
+        # Mutating endpoints use loopback + same-origin CSRF (the old API-token
+        # auth was removed — see PUNCHLIST F-01). Send a same-origin Origin so
+        # POSTs pass the gate; the test client is already loopback (127.0.0.1).
+        client.environ_base["HTTP_ORIGIN"] = "http://localhost"
+        # Allow the file-picker tests to browse under /tmp.
+        import history_search.server as srv
+        srv.BROWSE_ROOTS = [Path("/tmp")]
 
         # Inject db_path for every request
         @app.before_request
@@ -421,17 +428,17 @@ def run_tests():
         # ---------------------------------------------------------------
         # GET /api/browse — file picker
         # ---------------------------------------------------------------
-        r = client.get("/api/browse?path=/")
+        r = client.get("/api/browse?path=/tmp")
         data = r.get_json()
         if r.status_code == 200 and "entries" in data and "path" in data:
-            print("[PASS] GET /api/browse — lists root directory")
+            print("[PASS] GET /api/browse — lists a directory")
             passed += 1
         else:
             print(f"[FAIL] GET /api/browse — {data}")
             failed += 1
 
-        # GET /api/browse — nonexistent path
-        r = client.get("/api/browse?path=/nonexistent_path_xyz")
+        # GET /api/browse — nonexistent path (within an allowed root)
+        r = client.get("/api/browse?path=/tmp/nonexistent_path_xyz")
         if r.status_code == 404:
             print("[PASS] GET /api/browse — 404 for bad path")
             passed += 1
@@ -521,49 +528,28 @@ def run_tests():
             failed += 1
 
         # ---------------------------------------------------------------
-        # Security: API token enforcement
+        # Security: same-origin CSRF gate on mutating endpoints
+        # (the old API-token auth was removed — see PUNCHLIST F-01;
+        #  do NOT reintroduce token auth)
         # ---------------------------------------------------------------
-        import history_search.server as srv
-        old_token = srv.API_TOKEN
-        srv.API_TOKEN = "test-secret-token"
-        try:
-            # Without token → 401
-            r = client.post("/api/clear")
-            if r.status_code == 401:
-                print("[PASS] POST /api/clear — 401 without token")
-                passed += 1
-            else:
-                print(f"[FAIL] POST /api/clear no token — expected 401, got {r.status_code}")
-                failed += 1
+        # A cross-origin POST is rejected by the CSRF defense (loopback model).
+        r = client.post("/api/clear", headers={"Origin": "http://evil.example"})
+        if r.status_code == 403:
+            print("[PASS] POST /api/clear — 403 cross-origin (CSRF defense)")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/clear cross-origin — expected 403, got {r.status_code}")
+            failed += 1
 
-            # With wrong token → 401
-            r = client.post("/api/clear", headers={"X-API-Token": "wrong"})
-            if r.status_code == 401:
-                print("[PASS] POST /api/clear — 401 with wrong token")
-                passed += 1
-            else:
-                print(f"[FAIL] POST /api/clear wrong token — expected 401, got {r.status_code}")
-                failed += 1
-
-            # With correct token → 200
-            r = client.post("/api/clear", headers={"X-API-Token": "test-secret-token"})
-            if r.status_code == 200:
-                print("[PASS] POST /api/clear — 200 with correct token")
-                passed += 1
-            else:
-                print(f"[FAIL] POST /api/clear correct token — expected 200, got {r.status_code}")
-                failed += 1
-
-            # Token via query param
-            r = client.post("/api/rebuild-fts?token=test-secret-token")
-            if r.status_code == 200:
-                print("[PASS] POST /api/rebuild-fts — 200 with token in query param")
-                passed += 1
-            else:
-                print(f"[FAIL] POST /api/rebuild-fts token query — expected 200, got {r.status_code}")
-                failed += 1
-        finally:
-            srv.API_TOKEN = old_token
+        # A same-origin POST is allowed (default Origin is same-origin). This also
+        # wipes the DB so the re-seed below starts from a known 3-visit state.
+        r = client.post("/api/clear")
+        if r.status_code == 200:
+            print("[PASS] POST /api/clear — 200 same-origin")
+            passed += 1
+        else:
+            print(f"[FAIL] POST /api/clear same-origin — expected 200, got {r.status_code}")
+            failed += 1
 
         # ---------------------------------------------------------------
         # Security: Browse root restriction

@@ -38,13 +38,17 @@ CHROME_TRANSITION_QUALIFIERS = {
     0x80000000: "server_redirect",
 }
 
-# Chrome visit_source table values
+# Chrome visit_source.source values — the Chromium VisitSource enum
+# (components/history/core/browser/history_types.h). Chrome writes a row here
+# ONLY for non-locally-browsed visits; a *missing* row means the visit was
+# browsed locally and is handled in ingest (do NOT add a 0 default here).
 CHROME_VISIT_SOURCE = {
-    0: "local",
-    1: "synced",
-    2: "extension",
-    3: "imported",
-    4: "local",  # BROWSED (newer Chrome)
+    0: "synced",     # SOURCE_SYNCED          - synchronized from another device
+    1: "local",      # SOURCE_BROWSED         - browsed on this device
+    2: "extension",  # SOURCE_EXTENSION
+    3: "imported",   # SOURCE_FIREFOX_IMPORTED
+    4: "imported",   # SOURCE_IE_IMPORTED
+    5: "imported",   # SOURCE_SAFARI_IMPORTED
 }
 
 # Firefox visit types

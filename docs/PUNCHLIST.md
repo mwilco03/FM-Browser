@@ -39,6 +39,8 @@ The "🔥 USER" prefix marks issues the user explicitly called out.
 - Add `--allow-remote` flag for non-loopback binds; print a loud warning + recommend reverse proxy with auth.
 - SPA: delete the token input, the Security panel, and `authHeaders()`.
 
+**Standing decision (2026-06-20, user — restated emphatically):** the API-token model is **permanently rejected**; the user considers the entire token workflow idiotic. Do NOT reintroduce token/bearer auth in any form, in code, tests, docs, or review suggestions. The model is loopback + same-origin CSRF (`require_local`), with a reverse proxy for remote auth. Any lingering token reference is rot to delete — e.g. `tests/test_e2e_server.py` still reads `srv.API_TOKEN` (which no longer exists) and breaks the suite; fix by removing it, not by restoring the token.
+
 ### F-02 [Blocker]  Password-protected archive extraction does not work
 **Confidence**: Confirmed (no `--archive-password` flag; passwords are a hardcoded malware-analysis list `["infected", "dangerous", ""]` in `constants.py:5`).
 **Files**: `history_search/pipeline/constants.py:5`, `history_search/pipeline/extract.py:213-309`, `history_search/server.py:813-823`.
@@ -101,6 +103,7 @@ The "🔥 USER" prefix marks issues the user explicitly called out.
 - `/api/sources/delete` removes the `ingest_log` row but leaves visits orphaned (silent forensic data orphaning).
 - E2E tests (`test_e2e_server.py`) seed the DB via raw SQL using matched values, masking the bug.
 **Fix**: Force `insert_visits` to overwrite each record's `source_db_path` from its `source_db=` keyword arg; remove the field assignment from extractors. Add a regression test that ingests a real archive and asserts `live_rows > 0` for `/api/sources`.
+**Status: FIXED 2026-06-20 (see UA-1).** Regression test added: `tests/test_index.py::TestIndex::test_source_db_path_matches_ingest_log_for_sources_join` asserts `insert_visits` overwrites `source_db_path`, the `/api/sources` join yields `live_rows > 0`, and delete-by-source removes the rows. Also exercised end-to-end against the real acquisition in CT 228 (see Round-trip log).
 
 ### B-2 [Blocker]  Tar extraction admits absolute paths -> write-anywhere
 **Confidence**: Confirmed.
@@ -324,3 +327,140 @@ Cosmetic.
 **Forensic-soundness sprint** (week 2): B-3, B-4, B-5, B-9, H-9, H-12, M-10, L-1.
 **Architecture sprint** (week 3): B-1, B-7, H-1, H-2, M-2, M-4, M-8, M-11.
 **Data-architecture sprint** (week 4): H-3, H-6, H-7, H-11, M-1, M-3, M-5, M-6, M-7.
+
+---
+
+## Usability & Analysis review (2026-06-20)
+
+Source: a second full pass re-framed around the **analyst's investigative workflow** — can someone load an acquisition and answer forensic questions, and can they trust and navigate what the tool tells them? Security/passwords explicitly out of scope for this pass (tracked above). Severity = analyst impact. Confidence per epistemic-discipline rules.
+
+### UA-1 [Blocker]  Source Manager reports 0 live rows and "delete" orphans every browser visit
+**Confidence**: Confirmed (read + empirically reproduced, see Round-trip log).
+**Files**: `history_search/pipeline/ingest.py:298,387,510` (all three browser extractors set `source_db_path=str(meta.browser_profile)`, e.g. `"Default"`), `history_search/pipeline/index.py:158` (`ingest_log.source_db` = real path), `history_search/server.py:839` (`LEFT JOIN visits v ON v.source_db_path = il.source_db`), `:869` (`DELETE FROM visits WHERE source_db_path = ?`).
+**Symptom**: profile-string never equals the real path, so `/api/sources` `live_rows` is always 0 for Chromium/Gecko/WebKit sources and "Remove source" deletes the `ingest_log` row while leaving every visit orphaned. Carve/Teams rows set the path correctly (`carve.py`, `ingest.py:624`), so the inventory is inconsistent on top of being wrong. This is the same root cause as **B-1** and is still live.
+**Fix**: have `insert_visits` overwrite each record's `source_db_path` from its `source_db=` kwarg (single home), and drop the field assignment from the extractors. Validated below.
+**Status: FIXED 2026-06-20.** `insert_visits` (`index.py`) now overwrites `source_db_path` from `source_db`; the three `str(meta.browser_profile)` assignments were removed from `extract_chromium`/`extract_gecko`/`extract_webkit`. This also fixes carved sources (whose `ingest_log.source_db` is `<path> [carved]`) and the Gecko fallback path (which omitted the field). Re-verified through the real pipeline + live endpoints in CT 228: `/api/sources` → `live_rows: 4`, `/api/sources/delete` → removed 4, 0 orphaned; suite 7/7 green.
+
+### UA-2 [High]  Ingest gives the analyst no progress — during the one operation that takes minutes-to-hours
+**Confidence**: Confirmed.
+**Files**: `history_search/server.py:136-219` (`run_pipeline` is fully instrumented with `on_progress(...)` messages), `:922` (`/api/ingest` calls `run_pipeline` with **no** `on_progress` and synchronously in the request thread).
+**Symptom**: the progress messages exist and are emitted into a callback that is never supplied, so the IngestView "live log" stays empty and the analyst can't tell working from hung.
+**Fix**: move ingest off the request thread (job + SSE/poll) and pass an `on_progress` that streams to the UI.
+
+### UA-3 [High]  Timeline silently drops out-of-range timestamps
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/ingest.py:167,170-171,180,193` (hardcoded year-2100 ceiling `4102444800` and swallowed `datetime` errors → `""`, no log).
+**Forensic impact**: clock-skewed/tampered times — themselves leads — vanish from the timeline with no flag. The analyst sees a clean timeline with invisible holes.
+**Fix**: preserve and **flag** out-of-range/unparseable timestamps (e.g. `time_anomaly` tag + keep raw); never silently null.
+
+### UA-4 [High]  WAL-resident recent visits are mislabeled "recovered_deleted"
+**Confidence**: Confirmed (mechanism); Likely (frequency depends on browser WAL state).
+**Files**: `history_search/pipeline/ingest.py:703` (`immutable=1` makes Stage 2 ignore the WAL), `history_search/pipeline/carve.py:54-95` + `history_search/server.py:227` (carve scrapes the WAL and tags rows `recovered_deleted`).
+**Forensic impact**: the newest, live, never-deleted browsing can surface flagged as deleted → an analyst could wrongly conclude/testify "the user deleted this."
+**Fix**: merge committed WAL frames into Stage-2 visits; reserve `recovered_deleted` for freelist/slack carving, or label WAL-origin rows distinctly with explicit confidence.
+
+### UA-5 [High]  Carve active-URL filter over-suppresses genuinely deleted URLs
+**Confidence**: Confirmed (logic); Possible (real-world rate).
+**Files**: `history_search/pipeline/carve.py:386` (bidirectional `prefix.startswith(ap) or ap.startswith(prefix)`).
+**Forensic impact**: a single live `host/` prefix can erase every carved URL under that host → false "nothing was deleted." Worst kind of forensic error (absence inferred from a filter artifact).
+**Fix**: exact-match (or full host+path) the active-URL filter; never prefix-suppress.
+
+### UA-6 [Medium]  Transition vocabulary is an uncontrolled union — "intent" can't be cleanly filtered
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/constants.py:22-25,51-55` (Chrome emits `auto_bookmark`/`keyword_generated`, Firefox emits `embed`/`framed_link`), `enums.py:59-72` (`TransitionType` says `bookmark`/`embedded`/`link` and is imported by nobody), `index.py:45` (raw value stored).
+**Forensic impact**: the transition filter shows `embed` AND `embedded`, `auto_bookmark` AND `bookmark` as distinct; "show everything they typed" is not a clean query. Also see **B-9** (raw bitmask not persisted → the decoded label is unverifiable).
+**Fix**: normalize all three browser vocabularies onto `TransitionType` at ingest; persist the raw bitmask alongside.
+
+### UA-7 [Medium]  No single-visit detail view; navigation chains can't be walked
+**Confidence**: Confirmed.
+**Files**: `history_search/static/index.html:225` (`api.visit` defined, never called), `:685` (`from_visit_url` rendered as plain text, not a pivot), `history_search/server.py:629-645` (`/api/visit/{id}` exists but unused by the UI).
+**Forensic impact**: `from_visit` is resolved to `from_visit_url` (`ingest.py:217-235`) so the referrer graph exists, but the analyst can't click a visit to see its referrer or walk forward to its children — the edges are shown, traversal is impossible. For an investigation about navigation paths this is a core gap.
+**Fix**: build a visit-detail view; make referrer/`from_visit_url` a clickable pivot both directions.
+
+### UA-8 [Medium]  Frontend swallows backend failures — empty is indistinguishable from broken
+**Confidence**: Confirmed.
+**Files**: `history_search/static/index.html:224-235` (no `response.ok` check; every call is `fetch().then(r=>r.json())`), `:500,792,903` (silent `.catch(()=>{})`), `:532` (search failure only `console.error`s and leaves stale `allRows` on screen).
+**Forensic impact**: a server error renders as an empty chart/table; on search failure the analyst may draw conclusions from stale results believing they're current.
+**Fix**: check `response.ok`, surface a visible error state, clear stale results on failure.
+
+### UA-9 [Medium]  Re-classify can't repair attribution; rebuilds the record from two fields
+**Confidence**: Confirmed.
+**Files**: `history_search/server.py:938-951` (rebuilds `VisitRecord(full_url, title)` and rewrites only `dns_host/url_path/query_string_decoded/tags/unfurl`; `decompose_url` imported but unused).
+**Forensic impact**: transition, source, confidence, referrer, and time are untouched, so a mis-attribution can't be fixed without a full re-ingest (which needs the original evidence remounted).
+**Fix**: re-classify from the full stored record; or add a `reclassify_in_place` that can re-derive attribution where source data is retained.
+
+### UA-10 [Medium]  Forensic tags are noisy — triage chases false positives
+**Confidence**: Confirmed.
+**Files**: `classify.py:606-617` (`b64_payload` fires on any 44-char base64-ish string), `:721` (`ip_address_host` accepts `999.999.999.999`), `constants.py:156-159` + `classify.py:667` (`download_url` matches `.sh`/`.exe` anywhere incl. query strings), `:215,254,261` (`"google" in host` substring over-match), `server.py:394` (tag filter `LIKE '%"tag"%'` over-matches).
+**Fix**: validate IP octets, anchor extension match to the path tail, use eTLD+1 equality for provider checks, move tags to a `visit_tags` join table.
+
+### UA-11 [Medium]  UTC-only — device local timezone never captured
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/ingest.py:161-197`.
+**Forensic impact**: most timeline arguments are "active at 2am *local*"; the device TZ is derivable from the acquisition and simply never recorded, forcing off-tool TZ math every time.
+**Fix**: capture/store device timezone (or offset) and display local + UTC.
+
+### UA-12 [Low]  CSV export is undocumentable and self-overwriting
+**Confidence**: Confirmed. **Files**: `history_search/server.py:571-626` (fixed filename `export.csv`, no metadata header).
+**Fix**: timestamped filename + header block recording tool/version, query, filters, export time.
+
+### UA-13 [Low]  No case context — can't build or annotate a case in-tool
+**Confidence**: Confirmed (absence). No case-id/examiner fields, notes, bookmarking, "mark relevant," or saved queries anywhere.
+**Fix**: case metadata at ingest; per-visit analyst notes/flags; saved searches.
+
+### UA-14 [Low]  Two timestamp formats coexist in the DB
+**Confidence**: Confirmed. **Files**: `classify.py:278,542` emit `"%Y-%m-%d %H:%M:%S UTC"` vs ISO-8601 `…Z` everywhere else; unfurled timestamps won't sort/compare with visit times.
+
+### UA-15 [Low]  Accessibility + large-evidence performance
+**Confidence**: Confirmed. **Files**: `index.html:672` (mouse-only row expansion, no keyboard/role), `:409` (modal has no Esc/focus trap), `:9,210` (in-browser Babel), `:1133-1135` (all three views stay mounted → big DOM + running observers on large result sets).
+
+### UA-16 [Medium]  Path-derived identity gaps misattribute "who" and "which browser"
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/ingest.py:94,108` (only macOS + Windows path patterns; no `LINUX_BROWSER_PATHS`), `:119-125` (engine→browser fallback collapses all Chromium browsers to `"chrome"`).
+**Forensic impact**: Linux acquisitions yield empty `os_username`; Edge/Brave/Vivaldi/Arc/Opera get mislabeled `chrome` whenever the path doesn't match a known pattern.
+**Fix**: add Linux path patterns; carry the detected browser from the path/engine instead of defaulting to `chrome`.
+
+### UA-17 [Blocker]  Chrome sync attribution is INVERTED — synced visits reported as "local, confirmed"
+**Confidence**: Confirmed (tool behavior reproduced in CT 228, see Round-trip log); Chromium enum semantics per documented `VisitSource` (Likely — from known Chromium `components/history/core/browser/history_types.h`).
+**Files**: `history_search/pipeline/constants.py:42-48` (`CHROME_VISIT_SOURCE`), `history_search/pipeline/ingest.py:267` (`COALESCE(visit_source.source, 0)`), `:288,309`.
+**Mechanism** — two compounding bugs:
+1. **Inverted value map.** The tool maps `0:"local", 1:"synced"` (constants.py:43-44). Chromium's enum is the opposite: `SOURCE_SYNCED=0, SOURCE_BROWSED=1, SOURCE_EXTENSION=2, SOURCE_FIREFOX_IMPORTED=3, SOURCE_IE_IMPORTED=4, SOURCE_SAFARI_IMPORTED=5`. The map is also internally incoherent — the comment at `:47` labels value `4` as "BROWSED (newer Chrome)" while value `1` is already called "synced", so no single visit can be consistently classified.
+2. **NULL/0 collision.** Chrome writes a `visit_source` row only for non-browsed visits; plain local browsing has **no row**. `COALESCE(visit_source.source, 0)` (ingest.py:267) folds "no row" (local) and an explicit `source=0` (SYNCED) into the same `0`, so even a corrected value map can't separate them — local-browse must be detected as a **NULL/missing row**, not as `0`.
+**Forensic impact**: this is the single most dangerous error for sync analysis. A URL synced from another device (the user may never have visited it on the examined machine) is reported as `visit_source="local"`, `confidence="confirmed"`. An examiner would place activity on the device that never happened there — and the tool is *most* confident exactly where it is wrong. Reproduced: src=0 (synced) → `local/confirmed`; src=1 (local) → `synced/confirmed`.
+**Fix**: (a) correct `CHROME_VISIT_SOURCE` to Chromium semantics (`0:synced, 1:local, 2:extension, 3/4/5:imported`); (b) stop `COALESCE`-ing to 0 — treat a missing `visit_source` row (NULL) as `local`, and an explicit `0` as `synced`; (c) only claim `confidence="confirmed"` for rows backed by an explicit `visit_source` entry, not for the NULL-default local case.
+**Related**: Gecko sync is a weak heuristic (`frecency < 0` → `synced/likely`, `ingest.py:378-380`) and Safari uses the `origin` column + tombstones (`ingest.py:501-506`) — both `"likely"`, neither verified against real synced profiles. Add tests with real synced Chrome/Firefox/Safari profiles. **Verified 2026-06-20 — see UA-18.**
+
+### UA-18 [High]  Firefox sync attribution is baseless; Safari is sound except the no-`origin` fallback
+**Confidence**: tool behavior **Confirmed** (reproduced in CT 228, see Round-trip log); browser semantics **Likely** (frecency and Safari `origin` meanings from domain knowledge, not re-verified against live profiles this session — verify with real Firefox-Sync / iCloud-synced profiles).
+**Files**: `history_search/pipeline/ingest.py:350-452` (extract_gecko; sync block `:395-407`), `:455-556` (extract_webkit; sync block `:521-530`).
+
+**Firefox (Gecko) — not trustworthy.** `places.sqlite` has **no per-visit sync-origin column**; Firefox Sync merges remote history into the same `moz_places`/`moz_historyvisits`, indistinguishable from local. The heuristic invents a verdict from proxies that carry no provenance:
+- `frecency < 0 → synced/likely` (`ingest.py:402-404`) — negative frecency means "not yet (re)calculated" (a transient ranking state for new/pending places), NOT sync. A fresh LOCAL visit with uncomputed frecency is mislabeled synced.
+- `moz_meta` has no sync key → **all** visits `local/confirmed` (`ingest.py:396-398`) — absence of a key in one table doesn't confirm local origin; `moz_meta` isn't the authoritative sync-account record. Common case → falsely "confirmed local."
+- Same DB yields `unknown`, `synced`, and `confirmed` for forensically identical visits.
+**Fix**: Firefox per-visit sync is not determinable from `places.sqlite`. Collapse to `local/unknown` (or `unknown`); never emit `synced` from `frecency`, never `confirmed` from absence of a `moz_meta` key. Real sync-vs-local needs an external artifact (sync logs / account state), not `places.sqlite`.
+
+**Safari (WebKit) — reasonably sound.** `history_visits.origin` is the real iCloud sync-direction signal (0=local, non-zero=synced); `origin != 0 → synced/likely` and `origin = 0 → local/confirmed` are correctly grounded and honestly labeled (`ingest.py:525-530`); the tombstone-taint downgrade (`local/likely`) is a defensible conservative choice. **One gap**: when the schema has no `origin` column (older Safari), the code falls through to `local/confirmed` (`ingest.py:529-530`) — it should be `local/unknown`, since sync can't be determined without `origin`.
+**Fix**: when `has_origin` is False, emit `local/unknown` instead of `local/confirmed`.
+**Status: FIXED 2026-06-20.** Gecko now emits `local/unknown` for every visit (the `frecency`/`moz_meta` heuristic and the unused `sync_enabled`/`frecency` reads were removed). Safari now emits `local/unknown` when there is no `origin` column (ordering: synced→tombstone-taint→origin=0 local/confirmed→no-origin local/unknown). Gecko/Safari tests in `test_extract_engines.py` updated to the corrected expectations; full suite 7/7 green; re-verified in CT 228.
+
+### Usability/analysis test-coverage gaps
+- No test asserting `/api/sources` `live_rows > 0` after a real ingest (would have caught UA-1/B-1).
+- No test that out-of-range timestamps are flagged rather than dropped.
+- No test that carved WAL rows are not mislabeled deleted.
+- No test that the carve active-URL filter doesn't suppress a genuinely-deleted URL.
+- No test that `/api/reingest` preserves transition/source/time.
+
+### Round-trip validation log (2026-06-20, CT 228 `fmbrowser-val`, Alpine + py3-flask 3.0.3)
+
+Ran the **real pipeline + real Flask endpoint** against a synthetic Windows Chrome acquisition at `Users/jdoe/AppData/Local/Google/Chrome/User Data/Default/History` (4 visits, incl. one year-2300 row). Evidence, not assertion:
+
+- **UA-1/B-1 — reproduced and fix validated.** All extractors set `visits.source_db_path='Default'` while `ingest_log.source_db` = real path → the `/api/sources` LEFT JOIN matches nothing.
+  - CURRENT code, real `/api/sources` HTTP response: `{live_rows: 0, ingested_rows: 4}`.
+  - `/api/sources/delete` with the real path removed **0** visits → all 4 orphaned.
+  - With fix (`source_db_path` = real path): HTTP `{live_rows: 4, ingested_rows: 4}`; delete removed **4**, 0 orphaned.
+- **UA-3 — reproduced.** The year-2300 visit was ingested with `visit_time_utc=''` (silently nulled by the `4102444800` ceiling); the other 3 converted correctly. 1 of 4 rows has a blank, unflagged timestamp.
+- **UA-17 — reproduced.** Fed a Chrome `visit_source` table with `source` 0/1/2 plus a no-row local visit. Tool output: `src=0 (SYNCED)` → `local/confirmed` (**wrong**), `src=1 (BROWSED/local)` → `synced/confirmed` (**wrong**), `src=2` → `extension/confirmed`, no-row → `local/confirmed`. Synced/local are inverted and both wrong cases are reported as `confirmed`.
+- **UA-18 — reproduced.** Drove `extract_gecko` and `extract_webkit` across the input matrix. Gecko: sync-ON/frecency=-1 → `synced/likely` (false signal), sync-OFF/frecency=-1 → `local/confirmed` (over-claim), sync-ON/frecency>=0 → `unknown/unknown` — three verdicts for forensically identical visits. Safari: origin=0 → `local/confirmed`, origin=1 → `synced/likely`, origin=0+tombstones → `local/likely`, no-origin-column → `local/confirmed` (should be `unknown`). Safari sound; Gecko baseless.
+
+**Recommended fix location** (single home): in `insert_visits` (`index.py:142-166`), before `_record_to_tuple`, set `r.source_db_path = source_db` for each record when `source_db` is provided; remove the `source_db_path=str(meta.browser_profile)` assignment from the three extractors (`ingest.py:298,387,510`). **Applied & re-verified 2026-06-20** (real pipeline + live `/api/sources` and `/api/sources/delete` in CT 228; suite 7/7).

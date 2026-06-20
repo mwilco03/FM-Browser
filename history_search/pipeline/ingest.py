@@ -210,6 +210,26 @@ def decode_chrome_transition(raw: int) -> Tuple[str, str]:
     return (core, ",".join(quals))
 
 
+def _chrome_visit_source(raw: Optional[int], has_source_table: bool) -> Tuple[str, str]:
+    """Map a Chrome ``visit_source.source`` value to ``(source, confidence)``.
+
+    Chrome only writes a ``visit_source`` row for visits that were *not* browsed
+    locally (synced from another device, added by an extension, or imported), so
+    the absence of a row is itself the signal for local browsing. Three cases:
+
+    - no ``visit_source`` table at all -> source cannot be attributed -> unknown.
+    - table present but no row for this visit (``raw is None``) -> local browsing,
+      inferred from absence (``likely``, not ``confirmed`` -- no stored value).
+    - table present with an explicit value -> map via ``CHROME_VISIT_SOURCE``
+      (0=synced, 1=local, ...) -> ``confirmed`` (direct evidence).
+    """
+    if not has_source_table:
+        return "local", "unknown"
+    if raw is None:
+        return "local", "likely"
+    return CHROME_VISIT_SOURCE.get(raw, "unknown"), "confirmed"
+
+
 # ---------------------------------------------------------------------------
 # Browser extractors — per-visit rows
 # ---------------------------------------------------------------------------
@@ -264,10 +284,14 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
 
     join_source = ""
     if has_visit_source_table:
-        cols.append("COALESCE(visit_source.source, 0) AS vsource")
+        # Raw source, NULL when there is no row. Chrome writes a visit_source row
+        # ONLY for non-locally-browsed visits, so a missing row means local
+        # browsing. Do NOT COALESCE to 0 -- that conflates "no row" (local) with
+        # an explicit source=0 (SOURCE_SYNCED). See _chrome_visit_source.
+        cols.append("visit_source.source AS vsource")
         join_source = "LEFT JOIN visit_source ON visit_source.id = visits.id"
     else:
-        cols.append("0 AS vsource")
+        cols.append("NULL AS vsource")
 
     sql = (
         f"SELECT {', '.join(cols)} FROM visits "
@@ -284,8 +308,8 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
             # Timestamp
             ts = _chrome_time_to_utc(visit_time or 0)
 
-            # Visit source
-            source_val = CHROME_VISIT_SOURCE.get(vsource, "unknown")
+            # Visit source (NULL vsource = no row = local; see _chrome_visit_source)
+            source_val, source_conf = _chrome_visit_source(vsource, has_visit_source_table)
 
             # Transition
             trans_core, trans_quals = decode_chrome_transition(transition or 0)
@@ -295,7 +319,6 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
 
             records.append(VisitRecord(
                 provenance_chain=provenance,
-                source_db_path=str(meta.browser_profile),
                 os_platform=meta.os_platform,
                 browser=meta.browser,
                 browser_engine=meta.browser_engine,
@@ -306,7 +329,7 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
                 full_url=url or "",
                 title=title or "",
                 visit_source=source_val,
-                visit_source_confidence="confirmed" if has_visit_source_table else "unknown",
+                visit_source_confidence=source_conf,
                 transition_type=trans_core,
                 transition_qualifiers=trans_quals,
                 visit_duration_ms=dur_ms,
@@ -328,30 +351,12 @@ def extract_gecko(conn: sqlite3.Connection, meta: SourceMetadata, provenance: st
     has_visit_type = _has_column(conn, "moz_historyvisits", "visit_type")
     has_from_visit = _has_column(conn, "moz_historyvisits", "from_visit")
 
-    # Check for Sync metadata
-    sync_enabled = False
-    try:
-        row = conn.execute("SELECT 1 FROM moz_meta WHERE key LIKE '%sync%' LIMIT 1").fetchone()
-        if row:
-            sync_enabled = True
-    except sqlite3.Error:
-        pass
-
-    # Also check for storage-sync-v2 indicator
-    if not sync_enabled:
-        try:
-            row = conn.execute("SELECT 1 FROM moz_meta WHERE key = 'sync/deviceID' LIMIT 1").fetchone()
-            if row:
-                sync_enabled = True
-        except sqlite3.Error:
-            pass
-
     vt_col = "v.visit_type" if has_visit_type else "0 AS visit_type"
     fv_col = "v.from_visit" if has_from_visit else "0 AS from_visit"
 
     sql = (
         f"SELECT p.url, COALESCE(p.title, ''), v.visit_date, v.id AS visit_id, "
-        f"{vt_col}, {fv_col}, p.frecency "
+        f"{vt_col}, {fv_col} "
         f"FROM moz_historyvisits v "
         f"JOIN moz_places p ON p.id = v.place_id "
         f"WHERE p.url IS NOT NULL "
@@ -361,30 +366,25 @@ def extract_gecko(conn: sqlite3.Connection, meta: SourceMetadata, provenance: st
     records = []
     try:
         for row in conn.execute(sql).fetchall():
-            url, title, visit_date, visit_id, visit_type, from_visit, frecency = row
+            url, title, visit_date, visit_id, visit_type, from_visit = row
 
             ts = _firefox_time_to_utc(visit_date or 0)
 
             # Transition type mapping
             trans = FIREFOX_VISIT_TYPE.get(visit_type, "other")
 
-            # Sync detection heuristic
-            if not sync_enabled:
-                source = "local"
-                confidence = "confirmed"
-            elif from_visit and from_visit > 0:
-                source = "local"
-                confidence = "confirmed"
-            elif frecency is not None and frecency < 0:
-                source = "synced"
-                confidence = "likely"
-            else:
-                source = "unknown"
-                confidence = "unknown"
+            # Firefox sync attribution: places.sqlite has NO per-visit sync-origin
+            # marker -- Firefox Sync merges remote history into the same
+            # moz_places/moz_historyvisits, indistinguishable from local. frecency
+            # is a ranking score (negative = "not yet recalculated", NOT sync) and a
+            # moz_meta sync key only means sync is configured, not that THIS visit
+            # came from it. Per-visit sync is therefore not determinable here, so we
+            # do not guess: local with unknown confidence. See PUNCHLIST UA-18.
+            source = "local"
+            confidence = "unknown"
 
             records.append(VisitRecord(
                 provenance_chain=provenance,
-                source_db_path=str(meta.browser_profile),
                 os_platform=meta.os_platform,
                 browser=meta.browser,
                 browser_engine=meta.browser_engine,
@@ -449,11 +449,16 @@ def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: s
     has_origin = _has_column(conn, "history_visits", "origin")
     has_redirect_src = _has_column(conn, "history_visits", "redirect_source")
     has_redirect_dst = _has_column(conn, "history_visits", "redirect_destination")
+    has_title = _has_column(conn, "history_visits", "title")
     has_tombstones = _has_table(conn, "history_tombstones")
 
     cols = [
         "history_items.url",
-        "COALESCE(history_items.title, '')",
+        # Safari stores the page title per-visit on `history_visits`, NOT on
+        # `history_items` (which has no title column). Selecting
+        # `history_items.title` raises "no such column" and the swallowed error
+        # silently dropped EVERY Safari row.
+        "COALESCE(history_visits.title, '')" if has_title else "'' AS title",
         "history_visits.visit_time",
         "history_visits.id AS visit_id",
     ]
@@ -497,12 +502,16 @@ def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: s
             source, confidence = "synced", "likely"
         elif has_tombstones:
             source, confidence = "local", "likely"
-        else:
+        elif has_origin:
+            # origin column present and == 0: explicit local marker.
             source, confidence = "local", "confirmed"
+        else:
+            # No origin column (older Safari schema): sync cannot be determined,
+            # so do not claim "confirmed". See PUNCHLIST UA-18.
+            source, confidence = "local", "unknown"
 
         records.append(VisitRecord(
             provenance_chain=provenance,
-            source_db_path=str(meta.browser_profile),
             os_platform=meta.os_platform,
             browser=meta.browser,
             browser_engine=meta.browser_engine,

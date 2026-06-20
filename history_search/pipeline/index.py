@@ -150,6 +150,14 @@ def insert_visits(db_path: str, records: List[VisitRecord], source_db: str = "",
     if not records:
         return 0
 
+    # Single home for source_db_path: the real evidence-DB path passed as
+    # `source_db` is authoritative. Overwrite per-record so /api/sources and
+    # /api/sources/delete -- which join visits.source_db_path = ingest_log.source_db
+    # -- actually match. Extractors no longer set this field. See PUNCHLIST UA-1/B-1.
+    if source_db:
+        for r in records:
+            r.source_db_path = source_db
+
     batch = [_record_to_tuple(r) for r in records]
 
     with sqlite3.connect(db_path) as conn:

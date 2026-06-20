@@ -64,10 +64,13 @@ def _create_chromium_db(db_path: Path, visits: list[dict]) -> None:
             "VALUES (?, ?, ?, 0, ?, ?)",
             (i, i, chrome_ts, transition, v.get("duration_us", 5_000_000)),
         )
-        conn.execute(
-            "INSERT INTO visit_source (id, source) VALUES (?, ?)",
-            (i, v.get("source", 0)),
-        )
+        # Chrome records a visit_source row ONLY for non-locally-browsed visits;
+        # omit it for local browsing (the realistic encoding the extractor relies on).
+        if "source" in v:
+            conn.execute(
+                "INSERT INTO visit_source (id, source) VALUES (?, ?)",
+                (i, v["source"]),
+            )
     conn.commit()
     conn.close()
 
@@ -115,13 +118,13 @@ def _create_safari_db(db_path: Path, visits: list[dict]) -> None:
         CREATE TABLE history_items (
             id INTEGER PRIMARY KEY,
             url TEXT NOT NULL,
-            title TEXT DEFAULT '',
             visit_count INTEGER DEFAULT 1
         );
         CREATE TABLE history_visits (
             id INTEGER PRIMARY KEY,
             history_item INTEGER NOT NULL REFERENCES history_items(id),
             visit_time REAL NOT NULL,
+            title TEXT DEFAULT '',
             origin INTEGER DEFAULT 0
         );
     """)
@@ -130,12 +133,12 @@ def _create_safari_db(db_path: Path, visits: list[dict]) -> None:
         # 2024-06-15T12:00:00Z = Unix 1718452800 → Safari 1718452800 - 978307200
         safari_ts = v.get("unix_ts", 1718452800) - 978307200
         conn.execute(
-            "INSERT INTO history_items (id, url, title) VALUES (?, ?, ?)",
-            (i, v["url"], v.get("title", "")),
+            "INSERT INTO history_items (id, url) VALUES (?, ?)",
+            (i, v["url"]),
         )
         conn.execute(
-            "INSERT INTO history_visits (id, history_item, visit_time, origin) VALUES (?, ?, ?, ?)",
-            (i, i, safari_ts, v.get("origin", 0)),
+            "INSERT INTO history_visits (id, history_item, visit_time, title, origin) VALUES (?, ?, ?, ?, ?)",
+            (i, i, safari_ts, v.get("title", ""), v.get("origin", 0)),
         )
     conn.commit()
     conn.close()
@@ -157,7 +160,7 @@ CHROME_VISITS = [
         "title": "My Drive - Google Drive",
         "unix_ts": 1718456400,
         "transition": 0,  # link
-        "source": 1,  # synced
+        "source": 0,  # SOURCE_SYNCED (Chromium)
     },
     {
         "url": "https://192.168.1.100:8080/admin/panel",
@@ -425,6 +428,10 @@ def run_tests():
         # ---------------------------------------------------------------
         app.config["TESTING"] = True
         client = app.test_client()
+        # Mutating endpoints (reingest, clear) use the same-origin CSRF gate
+        # (the old API-token auth was removed — see PUNCHLIST F-01); send a
+        # same-origin Origin so POSTs pass. The test client is already loopback.
+        client.environ_base["HTTP_ORIGIN"] = "http://localhost"
 
         @app.before_request
         def _set_db():

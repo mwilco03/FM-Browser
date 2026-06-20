@@ -74,7 +74,7 @@ class TestChromiumExtraction(unittest.TestCase):
         conn.execute("INSERT INTO visits VALUES(10,1,?,0,1,2000000)", (CHROME_TS,))
         conn.execute("INSERT INTO visits VALUES(11,2,?,10,1,0)", (CHROME_TS,))
         if with_visit_source:
-            conn.execute("INSERT INTO visit_source VALUES(10,1)")  # 1 = synced
+            conn.execute("INSERT INTO visit_source VALUES(10,0)")  # 0 = SOURCE_SYNCED (Chromium); visit 11 has no row = local browse
         conn.commit()
 
     def test_row_count_and_join(self):
@@ -96,8 +96,12 @@ class TestChromiumExtraction(unittest.TestCase):
             self._build(conn, with_visit_source=True)
             recs = extract_chromium(conn, _meta("chrome", "chromium"), "p")
             by_id = {r.raw_visit_id: r for r in recs}
+            # visit 10 has an explicit visit_source row of 0 = SOURCE_SYNCED
             self.assertEqual(by_id[10].visit_source, "synced")
             self.assertEqual(by_id[10].visit_source_confidence, "confirmed")
+            # visit 11 has NO visit_source row -> local browsing inferred from absence
+            self.assertEqual(by_id[11].visit_source, "local")
+            self.assertEqual(by_id[11].visit_source_confidence, "likely")
 
     def test_no_visit_source_table(self):
         with _TmpDB() as (conn, path):
@@ -153,19 +157,22 @@ class TestGeckoExtraction(unittest.TestCase):
             recs = extract_gecko(conn, _meta("firefox", "gecko"), "p")
             self.assertEqual(recs[0].transition_type, "typed")
 
-    def test_no_sync_is_local_confirmed(self):
+    def test_per_visit_sync_not_determinable_is_local_unknown(self):
+        # places.sqlite has no per-visit sync marker (UA-18): never claim
+        # confirmed/synced from frecency or moz_meta heuristics.
         with _TmpDB() as (conn, path):
             self._build(conn, with_sync=False)
             recs = extract_gecko(conn, _meta("firefox", "gecko"), "p")
             self.assertEqual(recs[0].visit_source, "local")
-            self.assertEqual(recs[0].visit_source_confidence, "confirmed")
+            self.assertEqual(recs[0].visit_source_confidence, "unknown")
 
-    def test_sync_negative_frecency_is_synced_likely(self):
+    def test_negative_frecency_is_not_a_sync_signal(self):
+        # frecency < 0 means "not yet recalculated", NOT synced (UA-18).
         with _TmpDB() as (conn, path):
             self._build(conn, with_sync=True, frecency=-1)
             recs = extract_gecko(conn, _meta("firefox", "gecko"), "p")
-            self.assertEqual(recs[0].visit_source, "synced")
-            self.assertEqual(recs[0].visit_source_confidence, "likely")
+            self.assertEqual(recs[0].visit_source, "local")
+            self.assertEqual(recs[0].visit_source_confidence, "unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -178,17 +185,18 @@ class TestWebkitExtraction(unittest.TestCase):
         origin_col = ", origin INTEGER" if with_origin else ""
         redirect_cols = (", redirect_source INTEGER, redirect_destination INTEGER"
                          if with_redirect else "")
+        # Real Safari: title lives on history_visits, history_items has NO title.
         conn.executescript(f"""
-            CREATE TABLE history_items(id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+            CREATE TABLE history_items(id INTEGER PRIMARY KEY, url TEXT);
             CREATE TABLE history_visits(id INTEGER PRIMARY KEY, history_item INTEGER,
-                visit_time REAL{origin_col}{redirect_cols});
+                visit_time REAL, title TEXT{origin_col}{redirect_cols});
         """)
         if with_tombstones:
             conn.execute("CREATE TABLE history_tombstones(id INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO history_items VALUES(1,'https://apple.example/p','P')")
-        cols = "id, history_item, visit_time"
-        vals = "100, 1, ?"
-        params = [float(SAFARI_TS)]
+        conn.execute("INSERT INTO history_items VALUES(1,'https://apple.example/p')")
+        cols = "id, history_item, visit_time, title"
+        vals = "100, 1, ?, ?"
+        params = [float(SAFARI_TS), "P"]
         if with_origin:
             cols += ", origin"; vals += ", ?"; params.append(1)
         if with_redirect:
@@ -196,9 +204,9 @@ class TestWebkitExtraction(unittest.TestCase):
             params += [0, 0]
         conn.execute(f"INSERT INTO history_visits({cols}) VALUES({vals})", params)
         if empty_url:
-            conn.execute("INSERT INTO history_items VALUES(2,'','')")
-            conn.execute("INSERT INTO history_visits(id, history_item, visit_time) "
-                         "VALUES(101, 2, ?)", (float(SAFARI_TS),))
+            conn.execute("INSERT INTO history_items VALUES(2,'')")
+            conn.execute("INSERT INTO history_visits(id, history_item, visit_time, title) "
+                         "VALUES(101, 2, ?, '')", (float(SAFARI_TS),))
         conn.commit()
 
     def test_row_count_and_join(self):
@@ -247,12 +255,14 @@ class TestWebkitExtraction(unittest.TestCase):
             self.assertEqual(recs[0].visit_source, "local")
             self.assertEqual(recs[0].visit_source_confidence, "likely")
 
-    def test_plain_is_local_confirmed(self):
+    def test_no_origin_column_is_local_unknown(self):
+        # Older Safari schema without an origin column: sync can't be determined,
+        # so confidence must be unknown, not confirmed (UA-18).
         with _TmpDB() as (conn, path):
             self._build(conn)
             recs = extract_webkit(conn, _meta("safari", "webkit"), "p")
             self.assertEqual(recs[0].visit_source, "local")
-            self.assertEqual(recs[0].visit_source_confidence, "confirmed")
+            self.assertEqual(recs[0].visit_source_confidence, "unknown")
 
     def test_redirect_columns_optional(self):
         with _TmpDB() as (conn, path):
