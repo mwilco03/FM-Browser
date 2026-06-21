@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -20,6 +22,14 @@ from .enums import Browser, BrowserEngine, BROWSER_ENGINE_MAP, OSPlatform
 from .models import SourceMetadata, VisitRecord
 
 LOG = logging.getLogger("history_search.ingest")
+
+
+class IngestError(Exception):
+    """Raised when a database extraction fails outright (vs. genuinely empty).
+
+    Lets run_pipeline distinguish "extraction broke" from "0 rows" so failures
+    surface to the analyst instead of masquerading as an empty DB (UA-26).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +349,10 @@ def extract_chromium(conn: sqlite3.Connection, meta: SourceMetadata, provenance:
             ))
     except sqlite3.Error as e:
         LOG.warning("Chromium extraction error: %s", e)
+        if not records:
+            # Total failure (e.g. bad query / schema variant) — don't let it look
+            # like an empty DB (UA-26). Partial results are kept + logged.
+            raise IngestError(f"chromium extraction failed: {e}") from e
 
     n = _resolve_referrer_urls(records)
     if n:
@@ -481,7 +495,7 @@ def extract_webkit(conn: sqlite3.Connection, meta: SourceMetadata, provenance: s
         cursor = conn.execute(sql)
     except sqlite3.Error as e:
         LOG.error("WebKit query failed against %s: %s", meta.browser_profile, e)
-        return []
+        raise IngestError(f"webkit extraction failed: {e}") from e
 
     for row in cursor.fetchall():
         url, title, visit_time, visit_id, redirect_src, redirect_dst, origin_val = row
@@ -716,6 +730,40 @@ def discover_databases(root: Path) -> List[Tuple[Path, str, SourceMetadata]]:
     return results
 
 
+def _log_extract(records, db_name, meta):
+    LOG.info("Extracted %d visits from %s [%s/%s/%s]", len(records), db_name,
+             meta.browser, meta.os_platform, meta.os_username or "?")
+    return records
+
+
+def _ingest_wal_applied(db_path: Path, meta: SourceMetadata, prov: str, extractor) -> List[VisitRecord]:
+    """Extract with the ``-wal`` applied so RECENT committed visits are captured
+    as LIVE rather than later mis-tagged ``recovered_deleted`` by the carver.
+
+    Works on a COPY (db + ``-wal`` + ``-shm``) so the original evidence and its
+    sidecars stay byte-for-byte intact; SQLite replays/checkpoints the WAL into
+    the throwaway copy only. (UA-4)
+    """
+    tmpd = Path(tempfile.mkdtemp(prefix="walmerge_"))
+    try:
+        dst = tmpd / db_path.name
+        shutil.copy2(db_path, dst)
+        for sfx in ("-wal", "-shm"):
+            side = Path(str(db_path) + sfx)
+            if side.exists():
+                shutil.copy2(side, tmpd / side.name)
+        with sqlite3.connect(str(dst)) as conn:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            return _log_extract(extractor(conn, meta, prov), db_path.name + " (WAL-merged)", meta)
+    except sqlite3.Error as e:
+        raise IngestError(f"WAL-merged extraction failed for {db_path.name}: {e}") from e
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
 def ingest_database(db_path: Path, engine: str, meta: SourceMetadata, provenance: str = "") -> List[VisitRecord]:
     """Extract all visit records from a single browser history database."""
     prov = provenance or str(db_path)
@@ -729,13 +777,20 @@ def ingest_database(db_path: Path, engine: str, meta: SourceMetadata, provenance
         LOG.warning("No extractor for engine: %s", engine)
         return []
 
+    # If a non-empty WAL sidecar exists, extract with it applied (on a copy) so
+    # recent committed browsing is LIVE, not later carved as "deleted" (UA-4).
+    wal = Path(str(db_path) + "-wal")
     try:
-        # immutable=1 prevents any write to evidence, including WAL checkpoint
+        has_wal = wal.exists() and wal.stat().st_size > 0
+    except OSError:
+        has_wal = False
+    if has_wal:
+        return _ingest_wal_applied(db_path, meta, prov, extractor)
+
+    try:
+        # No WAL: immutable=1 is the fast, zero-touch read of the evidence.
         with sqlite3.connect(f"file:{db_path}?immutable=1", uri=True) as conn:
-            records = extractor(conn, meta, prov)
-            LOG.info("Extracted %d visits from %s [%s/%s/%s]",
-                     len(records), db_path.name, meta.browser, meta.os_platform, meta.os_username or "?")
-            return records
+            return _log_extract(extractor(conn, meta, prov), db_path.name, meta)
     except sqlite3.Error as e:
         LOG.error("Failed to ingest %s: %s", db_path, e)
-        return []
+        raise IngestError(f"cannot open/read {db_path.name}: {e}") from e

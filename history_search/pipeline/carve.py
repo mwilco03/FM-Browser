@@ -37,6 +37,15 @@ _URL_VALID_CHARS = frozenset(
     "0123456789-._~:/?#[]@!$&'()*+,;=%"
 )
 
+# A syntactically valid DNS hostname. Rejects carve-fragment junk such as
+# "chicosfas.com=" or hosts with spaces. It does NOT validate the TLD against a
+# public-suffix list, so a 1-char over-read ("dropbox.comn") can still slip
+# through — see UA-20. Paired with the eTLD+1 work in UA-23 for the full fix.
+_VALID_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$",
+    re.IGNORECASE,
+)
+
 # Chrome epoch: microseconds since 1601-01-01 00:00:00 UTC
 _CHROME_EPOCH_OFFSET = 11644473600
 _TICK_DIVISOR = 1_000_000
@@ -172,11 +181,12 @@ def get_freelist_pages(db_data: bytes) -> List[bytes]:
 # URL carving from raw bytes
 # ---------------------------------------------------------------------------
 
-def carve_urls_from_pages(pages: List[bytes]) -> List[Dict[str, str]]:
+def carve_urls_from_pages(pages: List[bytes], now_ts: float) -> List[Dict[str, str]]:
     """Scan raw page data for URL strings and nearby timestamps.
 
     Returns list of dicts with 'url', 'title' (if found nearby), and
-    'timestamp_utc' (if a plausible timestamp is found near the URL).
+    'timestamp_utc' (if a plausible timestamp is found near the URL). now_ts is
+    the acquisition/'now' epoch used to reject impossible future timestamps.
     """
     seen_urls: Set[str] = set()
     results: List[Dict[str, str]] = []
@@ -202,10 +212,9 @@ def carve_urls_from_pages(pages: List[bytes]) -> List[Dict[str, str]]:
                 try:
                     p = urlparse(url)
                     host = p.hostname or ""
-                    if not host or "." not in host:
-                        continue
-                    # Reject if hostname has non-ASCII or control chars
-                    if not all(c.isascii() and c.isprintable() for c in host):
+                    # Strict hostname validation drops carve-fragment junk hosts
+                    # (UA-20) like "chicosfas.com=" / hosts with stray bytes.
+                    if not _VALID_HOSTNAME_RE.match(host):
                         continue
                 except Exception:
                     continue
@@ -218,7 +227,7 @@ def carve_urls_from_pages(pages: List[bytes]) -> List[Dict[str, str]]:
             seen_urls.add(url)
 
             # Try to find a timestamp near the URL in the same page
-            ts = _find_nearby_timestamp(page_data, m.start())
+            ts = _find_nearby_timestamp(page_data, m.start(), now_ts)
 
             # Try to find a title (printable text before the URL)
             title = _find_nearby_title(page_data, m.start())
@@ -232,35 +241,51 @@ def carve_urls_from_pages(pages: List[bytes]) -> List[Dict[str, str]]:
     return results
 
 
-def _find_nearby_timestamp(data: bytes, url_offset: int) -> str:
-    """Look for Chrome/Firefox/Safari timestamps near a URL in raw page data."""
-    # Search in a window around the URL
-    search_start = max(0, url_offset - 256)
-    search_end = min(len(data), url_offset + 256)
+_CARVE_TS_WINDOW = 64          # bytes either side of the URL (was 256 -> too noisy)
+# 2010-01-01. The old 2000 floor let tiny random float64s decode to ~2001, which
+# dumped every carved row at 2001-01-01. Modern browsing is well after 2010, and
+# this band excludes the spurious-small-float matches. (UA-19)
+_CARVE_TS_FLOOR = 1262304000
+
+
+def _find_nearby_timestamp(data: bytes, url_offset: int, now_ts: float) -> str:
+    """Best-effort timestamp for a carved URL.
+
+    Heuristic only — carved records have no reliable field layout — so callers
+    mark these confidence="possible". Improvements over the naive scan (UA-19):
+      - tight +/-64B window (less spurious matching),
+      - reject FUTURE timestamps (> now_ts) — this killed the 2030-2095 tail,
+      - return the candidate CLOSEST to the URL, not the first positional hit.
+    """
+    search_start = max(0, url_offset - _CARVE_TS_WINDOW)
+    search_end = min(len(data), url_offset + _CARVE_TS_WINDOW)
     window = data[search_start:search_end]
 
-    # Try 8-byte Chrome timestamps (microseconds since 1601)
+    best = None  # (distance_to_url, iso_string)
     for i in range(0, len(window) - 7):
+        dist = abs((search_start + i) - url_offset)
+        if best is not None and dist >= best[0]:
+            pass  # still check — a closer candidate may parse below
+        chunk = window[i:i + 8]
+        # Chrome int64 microseconds since 1601
         try:
-            val = struct.unpack("<Q", window[i:i + 8])[0]
-            # Chrome timestamp range: ~2000 to ~2100
-            unix_ts = (val / _TICK_DIVISOR) - _CHROME_EPOCH_OFFSET
-            if 946684800 <= unix_ts <= 4102444800:
-                return datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            unix_ts = (struct.unpack("<Q", chunk)[0] / _TICK_DIVISOR) - _CHROME_EPOCH_OFFSET
+            if _CARVE_TS_FLOOR <= unix_ts <= now_ts and (best is None or dist < best[0]):
+                best = (dist, datetime.fromtimestamp(unix_ts, tz=timezone.utc)
+                        .isoformat().replace("+00:00", "Z"))
         except (struct.error, OSError, OverflowError, ValueError):
-            continue
-
-    # Try 8-byte float Safari timestamps (seconds since 2001)
-    for i in range(0, len(window) - 7):
+            pass
+        # Safari float64 seconds since 2001
         try:
-            val = struct.unpack("<d", window[i:i + 8])[0]
-            unix_ts = val + _WEBKIT_EPOCH_OFFSET
-            if 946684800 <= unix_ts <= 4102444800 and val > 0:
-                return datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            fval = struct.unpack("<d", chunk)[0]
+            unix_ts = fval + _WEBKIT_EPOCH_OFFSET
+            if fval > 0 and _CARVE_TS_FLOOR <= unix_ts <= now_ts and (best is None or dist < best[0]):
+                best = (dist, datetime.fromtimestamp(unix_ts, tz=timezone.utc)
+                        .isoformat().replace("+00:00", "Z"))
         except (struct.error, OSError, OverflowError, ValueError):
-            continue
+            pass
 
-    return ""
+    return best[1] if best else ""
 
 
 def _find_nearby_title(data: bytes, url_offset: int) -> str:
@@ -357,7 +382,8 @@ def carve_deleted_records(
         return records
 
     # --- Carve URLs from all collected pages ---
-    carved = carve_urls_from_pages(all_pages)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    carved = carve_urls_from_pages(all_pages, now_ts)
     LOG.info("Carved %d unique URLs from %s", len(carved), db_path.name)
 
     # Build a set of active hostnames+paths for fuzzy matching
@@ -402,7 +428,7 @@ def carve_deleted_records(
             full_url=url,
             title=item.get("title", ""),
             visit_source="carved",
-            visit_source_confidence="likely",
+            visit_source_confidence="possible",  # carved timestamps are heuristic (UA-19)
             transition_type="other",
             tags=["recovered_deleted"],
         ))

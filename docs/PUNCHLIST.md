@@ -358,6 +358,7 @@ Source: a second full pass re-framed around the **analyst's investigative workfl
 **Files**: `history_search/pipeline/ingest.py:703` (`immutable=1` makes Stage 2 ignore the WAL), `history_search/pipeline/carve.py:54-95` + `history_search/server.py:227` (carve scrapes the WAL and tags rows `recovered_deleted`).
 **Forensic impact**: the newest, live, never-deleted browsing can surface flagged as deleted → an analyst could wrongly conclude/testify "the user deleted this."
 **Fix**: merge committed WAL frames into Stage-2 visits; reserve `recovered_deleted` for freelist/slack carving, or label WAL-origin rows distinctly with explicit confidence.
+**Status: FIXED 2026-06-21.** `ingest_database` (`ingest.py`) now detects a non-empty `-wal` sidecar and extracts with it applied via `_ingest_wal_applied`: it copies `db` + `-wal` + `-shm` to a temp dir, opens the COPY normally so SQLite replays/checkpoints the WAL, and extracts — the original evidence + sidecars stay byte-for-byte intact. Committed-but-uncheckpointed visits are now LIVE; the carver's active-URL filter then keeps them out of `recovered_deleted`. Proven with a synthetic uncheckpointed WAL: `immutable=1` saw 1 URL, `ingest_database` saw both (the WAL-resident visit recovered as live). The real `mack.wilcox` acquisition carries no uncheckpointed WAL data, so its counts are unchanged. Suite 7/7.
 
 ### UA-5 [High]  Carve active-URL filter over-suppresses genuinely deleted URLs
 **Confidence**: Confirmed (logic); Possible (real-world rate).
@@ -382,6 +383,32 @@ Source: a second full pass re-framed around the **analyst's investigative workfl
 **Files**: `history_search/static/index.html:224-235` (no `response.ok` check; every call is `fetch().then(r=>r.json())`), `:500,792,903` (silent `.catch(()=>{})`), `:532` (search failure only `console.error`s and leaves stale `allRows` on screen).
 **Forensic impact**: a server error renders as an empty chart/table; on search failure the analyst may draw conclusions from stale results believing they're current.
 **Fix**: check `response.ok`, surface a visible error state, clear stale results on failure.
+**Status: FIXED + browser-validated 2026-06-21.** `doSearch` now checks `resp.ok`, handles non-JSON/5xx and network failure distinctly, clears stale rows, and sets a visible `searchError`; the empty state renders **"Search failed: <reason>"** (red) instead of "No results" when an error is set. Proven in real Chromium (shutter) via route-interception: normal search 50 rows; simulated 500 → shows the error, does NOT say "No results", clears rows; recovers to 50 after. Zero pageerrors. This is the exact defect that made a down server look like "0 dropbox results."
+
+---
+
+## UX polish wave (2026-06-21, all browser-validated in real Chromium via the `browser-check` skill, zero pageerrors)
+
+- **UA-8 extended to all views.** Added an `okJson` wrapper so every `api.*` call rejects on non-2xx (preserving the JSON `{error}` message); `SearchView`, `SourceManager`, and `ExploreView` now surface a visible error instead of `.catch(()=>{})` blanking. Validated by route-injecting a 500.
+- **Confidence + exclude-carved filters (SearchView).** Wired the `min_confidence` and `exclude_source` API params into UI controls. Validated: `dropbox` 3 results → **2** with "Exclude carved" (drops the carved `dropbox.comn`).
+- **UA-11 heatmap timezone UI.** Added a TZ-offset picker in Explore driving `/api/heatmap?tz_offset=`; heatmap re-renders in local time. Validated: switched to UTC-5, activity shifted to a realistic Mon–Fri business-hours band, no midnight phantom spike.
+- **UA-25 first/last-seen in Explore.** `/api/aggregate` already returned them; `BarChart` now shows `first seen / last seen` per item on hover. Validated (30 host bars, tooltip present). *Remaining:* a rare-first (`sort=asc`) toggle in the UI (API already supports it).
+- **B-3 chain-of-custody in Source Manager.** `/api/sources` now returns `source_sha256` / `source_size_bytes` / `tool_version` / `classifier_version`, and the Source list renders `sha256…/tool/clf` per source. Validated.
+
+### Navigation + modal + polish (2026-06-21, browser-validated via shutter)
+- **Navigation (prioritized).** The visit detail now walks the chain: **"← from &lt;referrer&gt;"** finds the referring visit (contains-search, backward) and **"→ pages opened from here"** filters by a new `from_visit_url` API param (forward). Validated: forward filter returns the referred page (total=1 for the sample referrer); both links render; an `opened-from:` filter chip shows; zero pageerrors.
+- **Modal Esc + focus-trap** on the FilePicker (Esc closes, Tab cycles within, focus restored on close). Validated: opens, Esc closes.
+- **Rare-first toggle** in Explore (least-frequency stacking): top flips **1,133 → 1**. Validated.
+- **Favicon** added (`data:,`) — kills the `/favicon.ico` 404 seen in the logs.
+- **Keyboard row-expand a11y: skipped per user.** **aria-labels: not added** — Playwright locates everything by text/title/role, so they weren't needed (per "aria only if it helps automation").
+
+- **Multi-tag boolean filtering — DONE (browser-validated).** Migrated the single `tag` to a `tags[]` array + `tags_mode` (and/or); backend `_build_where` joins per-tag `LIKE` clauses with AND/OR. Clicking a tag pill adds it; chips are individually removable; a **match-ALL/ANY** toggle appears with 2+ tags. Validated: API `cloud_storage`=4, `AND`=1, `OR`=359 (AND ≤ single ≤ OR); UI toggle flips results 1 ↔ 3 under a dropbox query; zero pageerrors.
+
+- **Copy-row buttons — DONE.** Detail view has **URL / Row (TSV) / JSON** copy buttons via a `copyText` helper that uses `navigator.clipboard` on secure origins and falls back to a hidden-textarea `execCommand('copy')` on http. Validated: buttons render + click with zero pageerrors (clipboard read-back not verifiable over plain http — the exact reason the fallback exists).
+
+- **SRI-pinned the CDN scripts (H-5, partial) — DONE.** Added `integrity="sha384-…" crossorigin="anonymous" referrerpolicy="no-referrer"` to the React / ReactDOM / Babel `<script>` tags (hashes computed from the actual cdnjs files). A tampered CDN file will now be refused by the browser. Validated: app still renders with the pins, zero pageerrors. (Google Fonts left unpinned — stylesheet content varies, SRI breaks it.)
+
+**Still open (deferred, real efforts not polish):** case-id/examiner/per-visit notes (needs a backend table + endpoints + UI); kill in-browser Babel + vendor the JS locally (the remaining half of H-5 — fixes air-gap + perf, but introduces a build step that conflicts with the single-file no-build design → product decision).
 
 ### UA-9 [Medium]  Re-classify can't repair attribution; rebuilds the record from two fields
 **Confidence**: Confirmed.
@@ -444,6 +471,73 @@ Source: a second full pass re-framed around the **analyst's investigative workfl
 **Fix**: when `has_origin` is False, emit `local/unknown` instead of `local/confirmed`.
 **Status: FIXED 2026-06-20.** Gecko now emits `local/unknown` for every visit (the `frecency`/`moz_meta` heuristic and the unused `sync_enabled`/`frecency` reads were removed). Safari now emits `local/unknown` when there is no `origin` column (ordering: synced→tombstone-taint→origin=0 local/confirmed→no-origin local/unknown). Gecko/Safari tests in `test_extract_engines.py` updated to the corrected expectations; full suite 7/7 green; re-verified in CT 228.
 
+### Found via real-data dogfooding (2026-06-20, CT 228, the `mack.wilcox` acquisition: 10 DBs, 6,385 visits)
+
+Running a real forensic investigation across dimensions surfaced data-quality bugs the synthetic fixtures missed.
+
+### UA-19 [High]  Carved timestamps are ~98% wrong and silently pollute the timeline
+**Confidence**: Confirmed (measured on real data in CT 228).
+**Files**: `history_search/pipeline/carve.py:235-263` (`_find_nearby_timestamp`), `:299-412` (`carve_deleted_records` sets `confidence="likely"`).
+**Measured**: of 403 carved records, **396 (98%) carry an implausible timestamp** — 362 dumped at `2001-01` and 32 in the future (2030–2095); only 7 fell in the real activity window. The reported visit range for the whole case was `2001-01-01 → 2095-01-02` while real activity is 2023 + Mar–Jun 2026. Cause: the brute-force 8-byte window scan accepts any value in 2000–2100 (`946684800`–`4102444800`) and returns the first positional hit — almost always spurious. These are emitted as `confidence="likely"`, and the year-2100 ceiling doesn't catch the 95-year-wide junk band.
+**Forensic impact**: an analyst building a timeline sees a fake 2001 spike and bogus future dates; carved evidence looks time-anchored when it isn't. Compounds UA-4 (WAL/carve mislabeled deleted) and L-2.
+**Fix**: do not attach guessed timestamps as authoritative — only set `visit_time_utc` for carved rows when the value is structurally validated (correct field offset/record layout), else leave empty and mark `confidence="possible"`. Exclude carved rows from default timeline/heatmap, or render them on a separate, clearly-labeled track.
+
+### UA-20 [Medium]  Carved URL fragments yield malformed `dns_host`, polluting host aggregation
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/carve.py:175-232` (`carve_urls_from_pages` cleaning), `history_search/pipeline/classify.py:63-93` (`decompose_url`).
+**Measured**: hosts like `dropbox.comn`, `dropbox.comq=`, `chicosfas.com=`, `mailbait.infos=` appear in `/api/aggregate?group_by=dns_host` and the `cloud_storage` tag. Trailing/garbage bytes from carved slack aren't stripped, so `decompose_url` stores an invalid host, and host-based aggregations/filters/classifiers (e.g. `cloud_storage` matching `dropbox.com…`) get false members.
+**Fix**: validate `dns_host` (must be a syntactically valid hostname with a real TLD) before storing; drop or quarantine carved URLs whose host fails validation.
+
+### UA-21 [Low]  `chrome-extension://` URLs decompose to the extension ID as `dns_host` and tag `file_scheme`
+**Confidence**: Confirmed.
+**Files**: `history_search/pipeline/classify.py:63-93` (`decompose_url` → `urlparse` netloc = extension ID), `:652-661` (`_cls_file_scheme` groups `chrome-extension://` with `file://`/`data:`).
+**Measured**: `file_scheme` drilldown shows hosts like `aeblfdkhhhdcdjpifhhbdiojplfjncoa` (a Chrome extension ID). Extension activity is real and worth surfacing, but lumping the opaque ID into `dns_host` pollutes host aggregation and merging it with `file://` under one tag loses the distinction.
+**Fix**: treat `chrome-extension://` (and `moz-extension://`) as their own category/tag; don't use the extension ID as `dns_host` for aggregation (optionally resolve well-known extension IDs to names).
+
+### UA-22 [Low]  Search-term extraction may capture non-query strings
+**Confidence**: Possible (needs raw-URL confirmation — some may be legitimate searches of build-log lines).
+**Files**: `history_search/pipeline/classify.py:197-204` (inline search-term extraction in `unfurl_url`), `:798-810` (`extract_search_terms`).
+**Measured**: "search terms" included build/file paths like `/gettext-1.0/gettext-runtime/intl/conftest` (×15) and `/private/tmp/gettext-...conftest`. Either the user literally searched those (legit) or the extractor is pulling path-like `q=`/param values that aren't queries.
+**Fix**: confirm against the raw URLs; if artifacts, tighten the search-engine match (host must be eTLD+1 of a known engine) and skip values that look like filesystem paths.
+
+### UA-23 [High]  IOC pivoting is broken: FTS tokenizer shreds indicators; host filter is exact-only
+**Confidence**: Confirmed (demonstrated on real data, CT 228).
+**Files**: `history_search/pipeline/index.py:71` (`tokenize='unicode61'`), `history_search/server.py:322-333` (`_smart_to_fts5`), `:336-415` (`_build_where` — `FILTER_COLUMNS` host uses `dns_host = ?`), `:479-482` (`_get_filters`).
+**Measured**: `_smart_to_fts5("evil.com")` → `evil* AND com*` (matches any row with an evil-prefixed AND com-prefixed token, not the host); `"127.0.0.1"` → `127*`; `"8.8.8.8"` → `""` (every octet <2 chars is dropped → no FTS). The `host` filter is exact equality, so filtering `upwind.io` returns **0** while the real domain+subdomains = **470 across 5 hostnames** (`snowflakecomputing.com`: 0 vs 80; `sharepoint.com`: 0 vs 245). There is no domain/subdomain match, no CIDR, no field-scoped exact search.
+**Forensic impact**: the single most common threat-hunting action — pivot on a domain/IP IOC — either returns nothing (exact host) or noisy token soup (FTS). An analyst cannot reliably answer "every visit to this domain and its subdomains."
+**Fix**: add a registrable-domain/`dns_host` suffix filter (`host=` matches `host` and `*.host`), an exact-IOC mode, and consider a `dns_host` column with a trigram or substring index; stop routing dotted IOCs through the prefix-AND tokenizer.
+**Status: PARTIALLY FIXED 2026-06-20.** Added subdomain-aware `host=` (matches `host` + `*.host`) and strict `host_exact=` in `_build_where`. Verified on the real acquisition: `host=upwind.io` → **470** (was 0), `host=snowflakecomputing.com` → **80**, `host_exact=upwind.io` → 0. *Remaining:* indexed `etld1` column + a literal exact-IOC search mode that bypasses the `unicode61` tokenizer.
+
+### UA-24 [High]  Heatmap & time-aggregations are polluted by carved bogus timestamps; no exclude-source filter
+**Confidence**: Confirmed (measured).
+**Files**: `history_search/server.py:765-783` (`/api/heatmap`), `:697-708` (time-bucket aggregates), `:479-482` (`_get_filters` — only `exclude_host`, no exclude-source/confidence), `FILTER_COLUMNS` `visit_source` is exact `=`.
+**Measured**: 403 carved rows (UA-19, ~98% bogus times) feed `/api/heatmap`. The 00:00 hour shows **352** visits; with carved removed it is **2** — a phantom midnight spike. There is no filter to exclude carved/recovered rows or restrict to a confidence level (you can filter *to* one `visit_source`, not exclude one).
+**Forensic impact**: the behavioral-pattern view (when is this user active) is actively wrong; an analyst would mis-state working hours.
+**Fix**: exclude carved (or low-confidence) rows from heatmap/time aggregates by default; add `exclude_source`/`min_confidence` filters; fixing UA-19 also removes the worst of this.
+**Status: FIXED 2026-06-20.** `/api/heatmap` and time-bucket aggregates now default-exclude `visit_source='carved'` (override with `include_carved=1`); added `exclude_source` and `min_confidence` filters in `_build_where`. Verified: heatmap 00:00 went from **352 → 2** (and back to 352 with `include_carved=1`).
+
+### UA-25 [Medium]  No frequency stacking (first/last-seen) and a 200-row aggregation cap hide the long tail
+**Confidence**: Confirmed (measured).
+**Files**: `history_search/server.py:709-723` (aggregate returns `label,count` only), `:726` (no time bounds), `:663` (`limit = min(limit, 200)`).
+**Measured**: 388 distinct hosts; `/api/aggregate` caps at 200 → 188 hosts unreachable via the API, silently. Aggregation returns count only — no `first_seen`/`last_seen`/min/max per group. The rare-host stack (count=1, with timestamps) — which the API cannot produce — surfaced a proxy/VPN-acquisition session on 2026-06-16 ~19:50 (`iproyal.com`, `proxy5.net`, `proxynova.com`, `hola.org`, `proxyhub.me`, `ditatompel.com`) that top-N aggregation buries.
+**Forensic impact**: "least-frequency-of-occurrence" stacking is the core hunting technique; the rarest items are the most interesting and are exactly what the cap drops.
+**Fix**: return `first_seen`/`last_seen`/`count` per group; support ascending-by-count to the full tail (paginate, don't hard-cap at 200); `log()` any truncation.
+**Status: FIXED 2026-06-20.** `/api/aggregate` now returns `first_seen`/`last_seen` per group (computed over REAL visits — carved bogus times excluded from the bounds), and the cap was raised 200 → `MAX_AGG_LIMIT=5000`. Verified: `group_by=dns_host` returned **389** hosts with real windows (e.g. `teams.microsoft.com` 2026-03-23 → 2026-06-17); `sort=asc` surfaces the rare tail. *Remaining:* true offset pagination beyond 5000 + an explicit `truncated` flag.
+
+### UA-26 [High]  "empty" is indistinguishable from "extraction failed" — silent evidence loss
+**Confidence**: Confirmed.
+**Files**: `history_search/server.py:187-192` (rows==0 → `status:"empty"`), `history_search/pipeline/ingest.py` extractors swallow `sqlite3.Error` and return `[]` (`extract_chromium` ~317-318, `extract_webkit` ~506-508 `return []`, `extract_gecko` ~427-449).
+**Measured**: the real acquisition reported 2 Chrome DBs as `status:"empty"`. A DB whose extraction *failed* (lock, schema variant, corruption) is reported identically to a genuinely empty one, and the error only goes to `LOG.warning` (stderr) — never to the stats or the SPA.
+**Forensic impact**: completeness is the analyst's first duty; "empty" that is really "broken" means dropped evidence the analyst will never know to chase.
+**Fix**: distinguish `empty` (query ran, 0 rows) from `error` (extraction raised); carry the sqlite error into the stats/`extraction_failures` and surface it in the UI.
+
+### UA-27 [Medium]  CSV export is a JSON-soup dump, not a report-grade artifact
+**Confidence**: Confirmed.
+**Files**: `history_search/server.py:571-578` (`CSV_COLUMNS` include `tags` and `unfurl` as raw JSON strings), `:605` (no metadata header row), `:625` (fixed `filename=export.csv`).
+**Forensic impact**: the decoded intelligence the analyst came for (search terms, geo, embedded URLs, decoded timestamps) lands as an unparsed `unfurl` JSON cell; tags are a JSON array string. Imported to Excel/Splunk it's unusable per-field. No header records the query/filters/tool version/time, and re-exports overwrite `export.csv`, so the CSV is not court-reproducible (compounds UA-12, B-3).
+**Fix**: flatten unfurl artifacts into typed columns (or a long-format companion CSV), timestamped filename, and a metadata header (tool version, query, filters, export time, source hashes).
+**Status: FIXED 2026-06-20.** `/api/export` now writes a commented reproducibility header (tool_version, exported_utc, query, mode, filters), flattens `tags` to `; `-joined and `unfurl` to readable `type=value | …` pairs, and uses a timestamped filename `fmbrowser_export_<UTC>.csv`. Verified on real data (unfurl cell e.g. `embedded_url=https://console.upwind.io/onboarding`). *Remaining:* per-source SHA-256 in the header (depends on B-3) + an optional long-format artifact companion CSV.
+
 ### Usability/analysis test-coverage gaps
 - No test asserting `/api/sources` `live_rows > 0` after a real ingest (would have caught UA-1/B-1).
 - No test that out-of-range timestamps are flagged rather than dropped.
@@ -464,3 +558,27 @@ Ran the **real pipeline + real Flask endpoint** against a synthetic Windows Chro
 - **UA-18 — reproduced.** Drove `extract_gecko` and `extract_webkit` across the input matrix. Gecko: sync-ON/frecency=-1 → `synced/likely` (false signal), sync-OFF/frecency=-1 → `local/confirmed` (over-claim), sync-ON/frecency>=0 → `unknown/unknown` — three verdicts for forensically identical visits. Safari: origin=0 → `local/confirmed`, origin=1 → `synced/likely`, origin=0+tombstones → `local/likely`, no-origin-column → `local/confirmed` (should be `unknown`). Safari sound; Gecko baseless.
 
 **Recommended fix location** (single home): in `insert_visits` (`index.py:142-166`), before `_record_to_tuple`, set `r.source_db_path = source_db` for each record when `source_db` is provided; remove the `source_db_path=str(meta.browser_profile)` assignment from the three extractors (`ingest.py:298,387,510`). **Applied & re-verified 2026-06-20** (real pipeline + live `/api/sources` and `/api/sources/delete` in CT 228; suite 7/7).
+
+---
+
+## Sprint B + C implementation log (2026-06-21, CT 228, suite 7/7 throughout)
+
+Driven end-to-end against the real `mack.wilcox` acquisition. Every item below is implemented + verified; working tree only, **no git**.
+
+**Correctness (Sprint B):**
+- **UA-19 — FIXED.** `_find_nearby_timestamp` (`carve.py`) now uses a ±64B window, returns the candidate CLOSEST to the URL, rejects FUTURE values (> now), and raised the floor to 2010 (`_CARVE_TS_FLOOR`); carved confidence is now `possible`. Verified: overall date range went from `2001-01-01 → 2095-01-02` to **`2021-11 → 2026-06`**; carved-with-fabricated-time dropped from 396/403 to 1/356; future/2001 clusters → 0.
+- **UA-20 — FIXED (partial).** `_VALID_HOSTNAME_RE` in `carve.py` rejects carve-fragment junk hosts. Verified: `chicosfas.com=`, `dropbox.comq=`, `mailbait.infos=` gone. *Remaining:* a public-suffix check for 1-char over-reads like `dropbox.comn`.
+- **UA-21 — FIXED.** `decompose_url` blanks `dns_host` for `chrome-extension://`/`moz-extension://`; new `browser_extension` classifier replaces lumping them under `file_scheme`. Verified: 3 extension rows, host blanked, tagged, ext-id gone from host aggregation.
+- **UA-26 — FIXED.** New `IngestError`; extractors raise on hard failure; `run_pipeline` reports `status:"error"` (with detail in `extraction_failures`) vs `empty`. Verified: broken DB → error, valid-empty → empty; the 2 real Chrome DBs confirmed genuinely empty.
+
+**Admissibility / chain of custody (Sprint C):**
+- **B-9 — FIXED.** `raw_transition`/`raw_from_visit`/`raw_visit_id` columns added (schema + insert + `_record_to_tuple` + migration) and added to CSV export. Verified: 5,479 chromium rows carry the raw bitmask.
+- **B-3 — FIXED.** `ingest_log` gains `source_sha256`, `source_size_bytes`, `tool_version`, `classifier_version`; `run_pipeline` SHA-256s each evidence DB; `classifier_version()` fingerprints the registry. Verified on real data (e.g. `sha256=1db3ff02…`, `tool=1.0.0`, `clf=be5513ac35c9`).
+- **B-4 — FIXED.** Append-only `action_log` table + `log_action()`; `clear`/`delete`/`reingest`/`ingest` write audit rows. Verified: reingest wrote `('reingest', 6338, 'classifier be5513ac35c9')`.
+- **UA-9 — FIXED.** `/api/reingest` reconstructs from the stored row, re-derives transition from the persisted raw bitmask (B-9) for chromium, stamps + returns `classifier_version`, and audits the action.
+- **UA-11 — FIXED (heatmap).** `/api/heatmap` accepts `tz_offset` (signed minutes) and buckets in local time. Verified: busiest hour 13 UTC → 8 EST(−300) → 0 IST(+330). *Remaining:* tz on time-aggregates + auto-detecting device TZ from artifacts.
+
+**Search/UX (Sprint A follow-on):**
+- **UA-23 — effectively addressed for correctness.** Subdomain `host=` filter (Sprint A) + literal `mode=contains` already bypass the tokenizer; only the indexed `etld1` perf column remains.
+- **UA-7 — DONE + browser-validated.** SearchView detail view makes **Host** and **From Visit (referrer)** clickable pivots (`static/index.html`); `/api/visit/<id>` returns full enriched detail (incl. raw_* fields). **Validated in a real Chromium** (shutter / CT 208 on `chaos`, Playwright driving `/bin/chromium`) against the live server (CT 228 bound `0.0.0.0:8899`): SPA renders with **zero pageerrors** (the in-browser-Babel JSX compiles), both pivots present in the DOM, and clicking the Host pivot populated the `host` filter and narrowed results **50 → 20** (screenshots `01_loaded`/`03_detail`/`04_pivoted`). Full round-trip confirmed.
+- **UA-22 — open** (needs raw-URL confirmation whether build-path "search terms" are real or artifacts).

@@ -4,9 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Forensic History Search</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link rel="icon" href="data:," />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" integrity="sha384-tMH8h3BGESGckSAVGZ82T9n90ztNXxvdwvdM6UoR56cYcf+0iGXBliJ29D+wZ/x8" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" integrity="sha384-bm7MnzvK++ykSwVJ2tynSE5TRdN+xL418osEVF2DE/L/gfWHj91J2Sphe582B1Bh" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js" integrity="sha384-ku9eM40vVDsFUiERorrdlHlF0LIhdfn716M7TntM72Uo98T7LWiogD3hNenPx8Q0" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -220,19 +221,23 @@ const SOURCE_ICONS = {local:'\u{1F4CC}',synced:'\u2601',extension:'\u{1F9E9}',im
 // on the server. No client-side token is needed.
 const JSON_HEADERS = {'Content-Type':'application/json'};
 
+// Reject on non-2xx so callers can surface a real error instead of blanking
+// silently (UA-8). Preserves the JSON {error:...} message when present.
+const okJson = r => { if(!r.ok) return r.text().then(t=>{ let j; try{j=JSON.parse(t)}catch(_){}
+  throw new Error((j&&j.error)||('HTTP '+r.status+(r.statusText?' '+r.statusText:''))); }); return r.json(); };
 const api = {
-  search: p => fetch('/api/search?'+new URLSearchParams(p)).then(r=>r.json()),
-  visit: id => fetch('/api/visit/'+id).then(r=>r.json()),
-  aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(r=>r.json()),
-  filters: () => fetch('/api/filters').then(r=>r.json()),
-  heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(r=>r.json()),
-  ingest: (path, clear, passwords) => fetch('/api/ingest',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({path, clear: !!clear, passwords: passwords||[]})}).then(r=>r.json()),
-  reingest: () => fetch('/api/reingest',{method:'POST'}).then(r=>r.json()),
-  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(r=>r.json()),
-  clear: () => fetch('/api/clear',{method:'POST'}).then(r=>r.json()),
-  browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(r=>r.json()),
-  sources: () => fetch('/api/sources').then(r=>r.json()),
-  deleteSources: ids => fetch('/api/sources/delete',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({ids})}).then(r=>r.json()),
+  search: p => fetch('/api/search?'+new URLSearchParams(p)).then(okJson),
+  visit: id => fetch('/api/visit/'+id).then(okJson),
+  aggregate: p => fetch('/api/aggregate?'+new URLSearchParams(p)).then(okJson),
+  filters: () => fetch('/api/filters').then(okJson),
+  heatmap: p => fetch('/api/heatmap?'+new URLSearchParams(p)).then(okJson),
+  ingest: (path, clear, passwords) => fetch('/api/ingest',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({path, clear: !!clear, passwords: passwords||[]})}).then(okJson),
+  reingest: () => fetch('/api/reingest',{method:'POST'}).then(okJson),
+  rebuildFts: () => fetch('/api/rebuild-fts',{method:'POST'}).then(okJson),
+  clear: () => fetch('/api/clear',{method:'POST'}).then(okJson),
+  browse: path => fetch('/api/browse?'+new URLSearchParams({path})).then(okJson),
+  sources: () => fetch('/api/sources').then(okJson),
+  deleteSources: ids => fetch('/api/sources/delete',{method:'POST',headers:JSON_HEADERS,body:JSON.stringify({ids})}).then(okJson),
 };
 
 function useDebounce(v,ms){const[d,s]=useState(v);useEffect(()=>{const t=setTimeout(()=>s(v),ms);return()=>clearTimeout(t)},[v,ms]);return d}
@@ -278,6 +283,14 @@ function tryDecode(input){
 }
 
 function fmtSize(b){if(b==null)return '';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'K';if(b<1073741824)return(b/1048576).toFixed(1)+'M';return(b/1073741824).toFixed(1)+'G'}
+// Clipboard copy that also works on insecure (http) origins where
+// navigator.clipboard is unavailable — falls back to a hidden textarea.
+function copyText(s){
+  try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(s);return}}catch(_){}
+  const ta=document.createElement('textarea');ta.value=s;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  try{document.execCommand('copy')}catch(_){}document.body.removeChild(ta);
+}
 
 // Shared components
 function Spin(){return <span className="spinner"/>}
@@ -296,7 +309,7 @@ function BarChart({items,maxItems=20,color='var(--accent)',onClickLabel}){
   const top = items.slice(0,maxItems);
   const mx = Math.max(...top.map(i=>i.count),1);
   return <div>{top.map((it,i)=>(
-    <div key={it.label||i} className="bar-item">
+    <div key={it.label||i} className="bar-item" title={it.first?`${it.label}\nfirst seen: ${it.first}\nlast seen:  ${it.last}`:it.label}>
       <span className="bar-lbl" title={it.label} onClick={()=>onClickLabel&&onClickLabel(it.label)}>{it.label||'(empty)'}</span>
       <div className="bar-trk"><div className="bar-fill" style={{width:`${(it.count/mx)*100}%`,background:color}}/></div>
       <span className="bar-ct">{it.count.toLocaleString()}</span>
@@ -362,6 +375,7 @@ function FilePicker({onSelect,onClose}){
   const[pathInput,setPathInput]=useState('');
   const[cwd,setCwd]=useState('/');
   const filterRef=useRef(null);
+  const modalRef=useRef(null);
 
   const browse=useCallback(async(p)=>{
     setLoading(true);setError('');setFilter('');
@@ -377,6 +391,25 @@ function FilePicker({onSelect,onClose}){
 
   // Start at CWD
   useEffect(()=>{browse('.')},[browse]);
+
+  // Modal: Esc to close + Tab focus-trap; restore focus on close.
+  useEffect(()=>{
+    const el=modalRef.current; if(!el)return;
+    const prev=document.activeElement;
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();onClose();return}
+      if(e.key==='Tab'){
+        const f=Array.from(el.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')).filter(x=>!x.disabled&&x.offsetParent!==null);
+        if(!f.length)return;
+        const first=f[0],last=f[f.length-1];
+        if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
+        else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
+      }
+    };
+    el.addEventListener('keydown',onKey);
+    (el.querySelector('input,button')||el).focus();
+    return()=>{el.removeEventListener('keydown',onKey);if(prev&&prev.focus)prev.focus()};
+  },[onClose]);
 
   const handleSelect=(entry)=>{
     if(entry.is_dir){browse(entry.path)}
@@ -406,7 +439,7 @@ function FilePicker({onSelect,onClose}){
 
   const fmtDate=(ts)=>{if(!ts)return '';const d=new Date(ts*1000);return d.toISOString().replace('T',' ').slice(0,16)};
 
-  return(<div className="fp-overlay" onClick={onClose}>
+  return(<div className="fp-overlay" onClick={onClose} ref={modalRef} tabIndex={-1}>
     <div className="fp-dialog" onClick={e=>e.stopPropagation()}>
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
         <div className="card-h" style={{margin:0}}>Browse Server Files</div>
@@ -476,11 +509,15 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
   const[browser,setBrowser]=useState(initialFilters?.browser||'');
   const[visitSource,setVisitSource]=useState(initialFilters?.visit_source||'');
   const[osPlatform,setOsPlatform]=useState(initialFilters?.os_platform||'');
-  const[tag,setTag]=useState(initialFilters?.tag||'');
+  const[tags,setTags]=useState(initialFilters?.tag?[initialFilters.tag]:[]);
+  const[tagMode,setTagMode]=useState('and');
   const[transType,setTransType]=useState(initialFilters?.transition_type||'');
   const[startDate,setStartDate]=useState(initialFilters?.start||'');
   const[endDate,setEndDate]=useState(initialFilters?.end||'');
   const[excludeHosts,setExcludeHosts]=useState([]);
+  const[minConf,setMinConf]=useState('');
+  const[exclCarved,setExclCarved]=useState(false);
+  const[fromVisitUrl,setFromVisitUrl]=useState('');
   const[results,setResults]=useState(null);
   const[allRows,setAllRows]=useState([]);
   const[loading,setLoading]=useState(false);
@@ -505,7 +542,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     if(initialFilters?.browser)setBrowser(initialFilters.browser);
     if(initialFilters?.visit_source)setVisitSource(initialFilters.visit_source);
     if(initialFilters?.os_platform)setOsPlatform(initialFilters.os_platform);
-    if(initialFilters?.tag)setTag(initialFilters.tag);
+    if(initialFilters?.tag)setTags([initialFilters.tag]);
     if(initialFilters?.transition_type)setTransType(initialFilters.transition_type);
   },[initialFilters]);
 
@@ -516,23 +553,35 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     if(query){p.q=query;p.mode=searchMode}
     if(host)p.host=host;if(browser)p.browser=browser;
     if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
-    if(tag)p.tag=tag;if(transType)p.transition_type=transType;
+    if(tags.length){p.tags=tags.join(',');p.tags_mode=tagMode}if(transType)p.transition_type=transType;
     if(startDate)p.start=startDate+'T00:00:00Z';
     if(endDate)p.end=endDate+'T23:59:59Z';
     if(excludeHosts.length)p.exclude_host=excludeHosts.join(',');
+    if(minConf)p.min_confidence=minConf;
+    if(exclCarved)p.exclude_source='carved';
+    if(fromVisitUrl)p.from_visit_url=fromVisitUrl;
     try{
       const resp=await fetch('/api/search?'+new URLSearchParams(p));
-      const res=await resp.json();
-      if(res.error){setSearchError(res.error);setResults({total:0,results:[]});setAllRows([]);}
-      else{
+      let res=null; try{res=await resp.json()}catch(_){}
+      if(!resp.ok||!res){
+        // transport-level failure (5xx / non-JSON) — surface it, don't blank silently (UA-8)
+        setSearchError((res&&res.error)||('server error '+resp.status+(resp.statusText?' '+resp.statusText:'')));
+        setResults({total:0,results:[]});setAllRows([]);
+      }else if(res.error){
+        setSearchError(res.error);setResults({total:0,results:[]});setAllRows([]);
+      }else{
         setResults(res);
         if(append){setAllRows(prev=>[...prev,...(res.results||[])])}
         else{setAllRows(res.results||[])}
       }
-    }catch(e){console.error(e)}
+    }catch(e){
+      // network failure / server unreachable — must NOT look like "No results" (UA-8)
+      setSearchError('Cannot reach server — is the backend running? ('+(e&&e.message||e)+')');
+      setResults({total:0,results:[]});setAllRows([]);
+    }
     setLoading(false);
     loadingMore.current=false;
-  },[host,browser,visitSource,osPlatform,tag,transType,startDate,endDate,sortCol,sortDir,excludeHosts,searchMode]);
+  },[host,browser,visitSource,osPlatform,tags,tagMode,transType,startDate,endDate,sortCol,sortDir,excludeHosts,searchMode,minConf,exclCarved,fromVisitUrl]);
 
   // Reset on filter/query change
   useEffect(()=>{setOffset(0);setAllRows([]);doSearch(dq,0,false)},[dq,doSearch]);
@@ -565,8 +614,8 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
 
   const addExclude=(h)=>{if(h&&!excludeHosts.includes(h))setExcludeHosts(prev=>[...prev,h])};
   const removeExclude=(h)=>setExcludeHosts(prev=>prev.filter(x=>x!==h));
-  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTag('');setTransType('');setStartDate('');setEndDate('');setExcludeHosts([]);setOffset(0)};
-  const hasFilters=host||browser||visitSource||osPlatform||tag||transType||startDate||endDate||excludeHosts.length;
+  const clearFilters=()=>{setHost('');setBrowser('');setVisitSource('');setOsPlatform('');setTags([]);setTagMode('and');setTransType('');setStartDate('');setEndDate('');setExcludeHosts([]);setMinConf('');setExclCarved(false);setFromVisitUrl('');setOffset(0)};
+  const hasFilters=host||browser||visitSource||osPlatform||tags.length||transType||startDate||endDate||excludeHosts.length||minConf||exclCarved||fromVisitUrl;
   const total=results?.total||0, rows=allRows;
 
   const exportCSV=()=>{
@@ -574,7 +623,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
     if(dq){p.q=dq;p.mode=searchMode}
     if(host)p.host=host;if(browser)p.browser=browser;
     if(visitSource)p.visit_source=visitSource;if(osPlatform)p.os_platform=osPlatform;
-    if(tag)p.tag=tag;if(transType)p.transition_type=transType;
+    if(tags.length){p.tags=tags.join(',');p.tags_mode=tagMode}if(transType)p.transition_type=transType;
     if(startDate)p.start=startDate+'T00:00:00Z';
     if(endDate)p.end=endDate+'T23:59:59Z';
     if(excludeHosts.length)p.exclude_host=excludeHosts.join(',');
@@ -636,7 +685,20 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
         <option value="">All transitions</option>
         {(filterOpts?.transition_type||['typed','link','bookmark','reload','form_submit','redirect_permanent','redirect_temporary']).map(t=><option key={t} value={t}>{t}</option>)}
       </select>
-      {tag&&<span className="badge b-tag" style={{cursor:'pointer'}} onClick={()=>{setTag('');setOffset(0)}}>{tag} x</span>}
+      <select className="f-sel" value={minConf} onChange={e=>{setMinConf(e.target.value);setOffset(0)}} title="Minimum source confidence">
+        <option value="">Any confidence</option>
+        <option value="confirmed">Confirmed only</option>
+        <option value="likely">Likely+</option>
+        <option value="possible">Possible+</option>
+      </select>
+      <label style={{fontFamily:'var(--mono)',fontSize:'.66rem',color:'var(--txt-2)',display:'flex',alignItems:'center',gap:4,cursor:'pointer'}} title="Hide carved / recovered-deleted records">
+        <input type="checkbox" checked={exclCarved} onChange={e=>{setExclCarved(e.target.checked);setOffset(0)}}/>Exclude carved
+      </label>
+      {tags.length>0&&<span style={{display:'inline-flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+        {tags.map(t=><span key={t} className="badge b-tag" style={{cursor:'pointer'}} title="Remove tag" onClick={()=>{setTags(tags.filter(x=>x!==t));setOffset(0)}}>{t} x</span>)}
+        {tags.length>1&&<button className="decode-btn" title="Match ALL vs ANY of the selected tags" onClick={()=>{setTagMode(m=>m==='and'?'or':'and');setOffset(0)}}>{tagMode==='and'?'match ALL':'match ANY'}</button>}
+      </span>}
+      {fromVisitUrl&&<span className="badge b-tag" style={{cursor:'pointer'}} title={fromVisitUrl} onClick={()=>{setFromVisitUrl('');setOffset(0)}}>opened-from: {fromVisitUrl.length>36?fromVisitUrl.slice(0,36)+'…':fromVisitUrl} x</span>}
       {excludeHosts.length>0&&<div className="excl-chips"><span style={{fontFamily:'var(--mono)',fontSize:'.64rem',color:'var(--txt-2)'}}>Excluding:</span>
         {excludeHosts.map(h=><span key={h} className="excl-chip" onClick={()=>removeExclude(h)}>{h} x</span>)}
       </div>}
@@ -655,7 +717,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
       {total>0&&<button className="ing-btn sec" onClick={exportCSV} style={{fontSize:'.68rem',padding:'4px 10px',marginLeft:4}} title="Export all matching results as CSV">Export CSV</button>}
     </div>
 
-    {rows.length===0&&!loading?<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>:(
+    {rows.length===0&&!loading?(searchError?<div className="empty"><h3 style={{color:'var(--red)'}}>Search failed</h3><p>{searchError}</p></div>:<div className="empty"><h3>No results</h3><p>Try a different query or ingest data first.</p></div>):(
     <div className="tbl-wrap"><table className="tbl"><thead><tr>
       <SortHeader label="Time" sortKey="time" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
       <SortHeader label="Source" sortKey="source" currentSort={sortCol} currentDir={sortDir} onSort={handleSort}/>
@@ -676,16 +738,21 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <td className="cell-tl" title={r.title}>{r.title}</td>
           <td className="cell-u" title={r.full_url}>{r.full_url}</td>
           <td className="cell-t" style={{textAlign:'right'}}>{r.full_url?.length}</td>
-          <td>{(r.unfurl||[]).length>0&&<span className="badge" style={{background:'var(--amber-dim)',color:'var(--amber)',cursor:'pointer',fontSize:'.6rem'}} title="Has unfurled data - click row to see">{(r.unfurl||[]).length}</span>}{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTag(t);setOffset(0)}}/>)}</td>
+          <td>{(r.unfurl||[]).length>0&&<span className="badge" style={{background:'var(--amber-dim)',color:'var(--amber)',cursor:'pointer',fontSize:'.6rem'}} title="Has unfurled data - click row to see">{(r.unfurl||[]).length}</span>}{(r.tags||[]).map(t=><TagPill key={t} tag={t} onClick={e=>{e.stopPropagation();setTags(p=>p.includes(t)?p:[...p,t]);setOffset(0)}}/>)}</td>
           <td><BrowserBadge b={r.browser}/></td>
           <td className="cell-tr">{r.transition_type}{r.transition_qualifiers?` (${r.transition_qualifiers})`:''}</td>
           <td className="cell-src" title={r.provenance_chain||r.source_db_path}>{r.source_db_path||r.provenance_chain||'-'}</td>
         </tr>
         {expanded===r.id&&<tr className="det"><td colSpan={COL_NUM}><div className="det-grid">
           <span className="det-k">Full URL</span><span className="det-v">{r.full_url}</span>
+          <span className="det-k">Copy</span><span className="det-v">
+            <button className="decode-btn" title="Copy the full URL" onClick={()=>copyText(r.full_url||'')}>URL</button>
+            <button className="decode-btn" style={{marginLeft:6}} title="Copy this row as TSV (time, url, host, browser, source, confidence, tags)" onClick={()=>copyText([r.visit_time_utc,r.full_url,r.dns_host,r.browser,r.visit_source,r.visit_source_confidence,(r.tags||[]).join('|')].join('\t'))}>Row (TSV)</button>
+            <button className="decode-btn" style={{marginLeft:6}} title="Copy this row as JSON" onClick={()=>copyText(JSON.stringify(r,null,2))}>JSON</button>
+          </span>
           <span className="det-k">URL Length</span><span className="det-v">{r.full_url?.length} chars</span>
           <span className="det-k">Title</span><span className="det-v">{r.title}</span>
-          <span className="det-k">Host</span><span className="det-v">{r.dns_host}</span>
+          <span className="det-k">Host</span><span className="det-v">{r.dns_host?<a style={{cursor:'pointer',color:'var(--accent)'}} title="Pivot: visits to this host (+ subdomains)" onClick={()=>{setHost(r.dns_host);setOffset(0)}}>{r.dns_host}</a>:'-'}</span>
           <span className="det-k">Path</span><span className="det-v">{r.url_path}</span>
           <span className="det-k">Query</span><span className="det-v" style={{color:'var(--green)'}}>{r.query_string_decoded||'-'}</span>
           {r.query_string_decoded&&r.query_string_decoded.includes('=')&&<>
@@ -700,7 +767,10 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <span className="det-k">Visit Source</span><span className="det-v"><SourceBadge source={r.visit_source} confidence={r.visit_source_confidence}/></span>
           <span className="det-k">Transition</span><span className="det-v">{r.transition_type} {r.transition_qualifiers&&`[${r.transition_qualifiers}]`}</span>
           <span className="det-k">Duration</span><span className="det-v">{r.visit_duration_ms>0?`${(r.visit_duration_ms/1000).toFixed(1)}s`:'-'}</span>
-          <span className="det-k">From Visit</span><span className="det-v">{r.from_visit_url||'-'}</span>
+          <span className="det-k">Navigation</span><span className="det-v">
+            {r.from_visit_url?<span><span style={{color:'var(--txt-2)'}}>&larr; from </span><a style={{cursor:'pointer',color:'var(--accent)'}} title="Find the referring visit" onClick={()=>{setSearchMode('contains');setQ(r.from_visit_url);setOffset(0)}}>{r.from_visit_url}</a></span>:<span style={{color:'var(--txt-2)'}}>&larr; no referrer</span>}
+            {r.full_url&&<a style={{cursor:'pointer',color:'var(--green)',marginLeft:14}} title="Show pages opened from this URL (forward in the navigation chain)" onClick={()=>{setFromVisitUrl(r.full_url);setOffset(0)}}>&rarr; pages opened from here</a>}
+          </span>
           <span className="det-k">User</span><span className="det-v">{r.os_username||'-'}</span>
           <span className="det-k">Profile</span><span className="det-v">{r.browser_profile||'-'}</span>
           <span className="det-k">Platform</span><span className="det-v">{r.os_platform}</span>
@@ -708,7 +778,7 @@ function SearchView({initialFilters,onDrillHost,onDrillTag}){
           <span className="det-k">Endpoint</span><span className="det-v">{r.endpoint_name||'-'}</span>
           <span className="det-k">File Source</span><span className="det-v" style={{color:'var(--blue)'}}>{r.source_db_path||'-'}</span>
           <span className="det-k">Provenance</span><span className="det-v" style={{fontSize:'.68rem'}}>{r.provenance_chain}</span>
-          {(r.tags||[]).length>0&&<><span className="det-k">Tags</span><span className="det-v">{r.tags.map(t=><TagPill key={t} tag={t} onClick={()=>{setTag(t);setOffset(0)}}/>)}</span></>}
+          {(r.tags||[]).length>0&&<><span className="det-k">Tags</span><span className="det-v">{r.tags.map(t=><TagPill key={t} tag={t} onClick={()=>{setTags(p=>p.includes(t)?p:[...p,t]);setOffset(0)}}/>)}</span></>}
           {(r.unfurl||[]).length>0&&<>
             <span className="det-k" style={{color:'var(--amber)',gridColumn:'1/-1',textAlign:'left',marginTop:8,borderTop:'1px solid var(--border)',paddingTop:8}}>URL UNFURL</span>
             <span className="det-v" style={{display:'none'}}/>
@@ -788,30 +858,34 @@ function ExploreView({onDrillToSearch}){
   const[filters,setFilters]=useState({});
   const[exploreQ,setExploreQ]=useState('');
   const dExploreQ=useDebounce(exploreQ,400);
+  const[err,setErr]=useState('');
+  const[tzOffset,setTzOffset]=useState(0);
+  const[aggSort,setAggSort]=useState('desc');
 
   useEffect(()=>{api.filters().then(setFilterInfo).catch(()=>{})},[]);
 
   useEffect(()=>{
     if(!dim)return;
-    setLoading(true);
-    const p={group_by:dim.key,limit:30,...filters};
+    setLoading(true);setErr('');
+    const p={group_by:dim.key,limit:30,sort:aggSort,...filters};
     if(dExploreQ)p.q=dExploreQ;
-    api.aggregate(p).then(r=>{setData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
-  },[dim,filters,dExploreQ]);
+    api.aggregate(p).then(r=>{setData(r.results||[]);setLoading(false)}).catch(e=>{setErr('Aggregate failed: '+(e&&e.message||e));setLoading(false)});
+  },[dim,filters,dExploreQ,aggSort]);
 
   useEffect(()=>{
     if(!timeDim)return;
-    setLoading(true);
+    setLoading(true);setErr('');
     const p={group_by:timeDim.key,limit:500,...filters};
     if(dExploreQ)p.q=dExploreQ;
-    api.aggregate(p).then(r=>{setTimeData(r.results||[]);setLoading(false)}).catch(()=>setLoading(false));
+    api.aggregate(p).then(r=>{setTimeData(r.results||[]);setLoading(false)}).catch(e=>{setErr('Aggregate failed: '+(e&&e.message||e));setLoading(false)});
   },[timeDim,filters,dExploreQ]);
 
-  const loadHeatmap=()=>{
-    setHmLoading(true);
+  const loadHeatmap=(tz=tzOffset)=>{
+    setHmLoading(true);setErr('');
     const hp={...filters};
     if(dExploreQ)hp.q=dExploreQ;
-    api.heatmap(hp).then(r=>{setHmData(r.cells||[]);setHmLoading(false)}).catch(()=>setHmLoading(false));
+    if(tz)hp.tz_offset=tz;
+    api.heatmap(hp).then(r=>{setHmData(r.cells||[]);setHmLoading(false)}).catch(e=>{setErr('Heatmap failed: '+(e&&e.message||e));setHmLoading(false)});
   };
 
   const drillToSearch=(label)=>{
@@ -857,14 +931,27 @@ function ExploreView({onDrillToSearch}){
         <option value="">All OS</option>
         {(filterInfo?.os_platform||[]).map(o=><option key={o} value={o}>{o}</option>)}
       </select>
+      <select className="f-sel" value={tzOffset} title="Heatmap timezone (local-time offset)" onChange={e=>{const v=+e.target.value;setTzOffset(v);loadHeatmap(v)}}>
+        <option value={0}>UTC</option>
+        <option value={-240}>UTC-4 EDT</option>
+        <option value={-300}>UTC-5 EST</option>
+        <option value={-360}>UTC-6 CST</option>
+        <option value={-420}>UTC-7 MST</option>
+        <option value={-480}>UTC-8 PST</option>
+        <option value={330}>UTC+5:30 IST</option>
+      </select>
     </div>
 
+    {err&&<div style={{color:'var(--red)',fontFamily:'var(--mono)',fontSize:'.72rem',marginBottom:10}}>{err}</div>}
     {loading&&<div style={{padding:20}}><Spin/> Loading...</div>}
 
     {dim&&data.length>0&&!loading&&(
       <div className="card" style={{marginBottom:14}}>
-        <div className="card-h">{dim.label} (top {Math.min(data.length,30)})</div>
-        <BarChart items={data.map(r=>({label:r.label,count:r.count}))} color={dim.color} maxItems={30}
+        <div className="card-h" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span>{dim.label} ({aggSort==='asc'?'rarest':'top'} {Math.min(data.length,30)})</span>
+          <button className="decode-btn" title="Toggle rarest-first (least-frequency-of-occurrence)" onClick={()=>setAggSort(s=>s==='asc'?'desc':'asc')}>{aggSort==='asc'?'Rarest first ▲':'Top first ▼'}</button>
+        </div>
+        <BarChart items={data.map(r=>({label:r.label,count:r.count,first:r.first_seen,last:r.last_seen}))} color={dim.color} maxItems={30}
           onClickLabel={drillToSearch}/>
       </div>
     )}
@@ -897,10 +984,12 @@ function SourceManager({onChanged}){
   const[selected,setSelected]=useState(new Set());
   const[loading,setLoading]=useState(true);
   const[deleting,setDeleting]=useState(false);
+  const[err,setErr]=useState('');
 
   const load=useCallback(()=>{
-    setLoading(true);
-    api.sources().then(r=>{setSources(r.sources||[]);setLoading(false)}).catch(()=>setLoading(false));
+    setLoading(true);setErr('');
+    api.sources().then(r=>{setSources(r.sources||[]);setLoading(false)})
+      .catch(e=>{setErr('Cannot load sources: '+(e&&e.message||e));setLoading(false)});
   },[]);
 
   useEffect(()=>{load()},[load]);
@@ -926,6 +1015,7 @@ function SourceManager({onChanged}){
   };
 
   if(loading)return <div className="ing-panel"><div className="card-h">Ingested Sources</div><Spin/> Loading...</div>;
+  if(err)return <div className="ing-panel"><div className="card-h">Ingested Sources</div><p style={{color:'var(--red)',fontSize:'.78rem',fontFamily:'var(--mono)'}}>{err}</p></div>;
   if(!sources.length)return <div className="ing-panel"><div className="card-h">Ingested Sources</div><p style={{color:'var(--txt-2)',fontSize:'.78rem'}}>No sources ingested yet.</p></div>;
 
   const totalVisits=sources.reduce((a,s)=>a+s.live_rows,0);
@@ -958,6 +1048,11 @@ function SourceManager({onChanged}){
               {s.browser_profile&&<span>{s.browser_profile}</span>}
               <span style={{color:'var(--txt-2)'}}>ingested {s.ingested_at}</span>
             </div>
+            {s.source_sha256&&<div className="src-meta" style={{fontFamily:'var(--mono)',fontSize:'.6rem',color:'var(--txt-2)',opacity:.85}}>
+              <span title={s.source_sha256}>sha256 {s.source_sha256.slice(0,16)}&hellip;</span>
+              {s.tool_version&&<span>tool {s.tool_version}</span>}
+              {s.classifier_version&&<span>clf {s.classifier_version}</span>}
+            </div>}
           </div>
           <div className="src-ct">{s.live_rows.toLocaleString()} visits</div>
         </div>

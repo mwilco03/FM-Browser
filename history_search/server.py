@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -25,6 +26,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -33,16 +35,18 @@ from urllib.parse import urlparse
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
 from .pipeline.carve import carve_deleted_records
-from .pipeline.classify import classify_batch
+from .pipeline.classify import classify_batch, classifier_version
 from .pipeline.constants import DEFAULT_SEARCH_LIMIT, INTERVAL_STRFTIME, MAX_SEARCH_LIMIT
 from .pipeline.extract import discover_files, extract_recursive
 from .pipeline.index import (
     TABLE_FTS, TABLE_VISITS, FTS_COLUMNS, init_schema, insert_visits,
-    is_already_ingested, rebuild_fts, get_visit_count, fts_row_count,
+    is_already_ingested, rebuild_fts, get_visit_count, fts_row_count, log_action,
 )
 from .pipeline.ingest import discover_databases, ingest_database
 
 LOG = logging.getLogger("history_search")
+
+TOOL_VERSION = "1.0.0"  # keep in sync with pyproject.toml
 
 app = Flask(__name__, static_folder="static")
 
@@ -133,6 +137,20 @@ def _is_within_browse_roots(target: Path) -> bool:
 # Full pipeline orchestration
 # ---------------------------------------------------------------------------
 
+def _sha256_file(path: Path):
+    """Return (sha256_hex, size_bytes) for chain of custody (B-3)."""
+    h = hashlib.sha256()
+    size = 0
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+                size += len(chunk)
+        return h.hexdigest(), size
+    except OSError:
+        return "", 0
+
+
 def run_pipeline(index_db: str, source_path: Path,
                  on_progress: Optional[callable] = None,
                  passwords: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -182,7 +200,21 @@ def run_pipeline(index_db: str, source_path: Path,
                 on_progress(f"Ingesting: {db_path.name} [{meta.browser}]")
 
             provenance = meta.endpoint_name or source_path.name
-            records = ingest_database(db_path, engine, meta, provenance)
+            try:
+                records = ingest_database(db_path, engine, meta, provenance)
+            except Exception as e:
+                # Extraction FAILED — surface it instead of reporting "empty"
+                # and silently dropping evidence (UA-26).
+                LOG.error("Ingest error for %s: %s", src_key, e)
+                stats["ingested"].append({
+                    "path": src_key, "browser": meta.browser,
+                    "os_platform": meta.os_platform, "rows": 0,
+                    "status": "error", "error": str(e),
+                })
+                stats["extraction_failures"].append({
+                    "archive": src_key, "reason": "ingest_error", "detail": str(e),
+                })
+                continue
 
             if not records:
                 stats["ingested"].append({
@@ -199,11 +231,14 @@ def run_pipeline(index_db: str, source_path: Path,
             # Stage 4: Index
             if on_progress:
                 on_progress(f"Indexing {len(records)} visits...")
+            src_hash, src_size = _sha256_file(db_path)
             count = insert_visits(
                 index_db, records, source_db=src_key,
                 meta_browser=meta.browser, meta_platform=meta.os_platform,
                 meta_username=meta.os_username, meta_profile=meta.browser_profile,
                 meta_endpoint=meta.endpoint_name,
+                source_sha256=src_hash, source_size_bytes=src_size,
+                tool_version=TOOL_VERSION, classifier_version=classifier_version(),
             )
 
             stats["total_new_rows"] += count
@@ -231,6 +266,8 @@ def run_pipeline(index_db: str, source_path: Path,
                         meta_browser=meta.browser, meta_platform=meta.os_platform,
                         meta_username=meta.os_username, meta_profile=meta.browser_profile,
                         meta_endpoint=meta.endpoint_name,
+                        source_sha256=src_hash, source_size_bytes=src_size,
+                        tool_version=TOOL_VERSION, classifier_version=classifier_version(),
                     )
                     stats["total_new_rows"] += carved_count
                     stats["ingested"].append({
@@ -279,6 +316,7 @@ FILTER_COLUMNS = {
     "transition_type": "v.transition_type",
     "browser_profile": "v.browser_profile",
     "endpoint_name": "v.endpoint_name",
+    "from_visit_url": "v.from_visit_url",
 }
 
 
@@ -299,6 +337,7 @@ AGG_GROUP_BY = ("dns_host", "browser", "os_platform", "os_username",
                 "transition_type", "browser_engine", "title",
                 "tags", "time_hour", "time_day", "time_week", "time_month")
 AGG_METRICS = ("count", "unique_urls", "unique_users")
+MAX_AGG_LIMIT = 5000  # was a hard 200 cap that hid the long tail (UA-25)
 
 # FTS5 reserved keywords (case-insensitive). Tokens matching these are
 # dropped during smart-mode sanitization to avoid syntax errors.
@@ -383,16 +422,61 @@ def _build_where(filters: Dict[str, Optional[str]], fts_q: str = "",
                 clauses.append("(" + " OR ".join(subs) + ")")
 
     for param_name, col_expr in FILTER_COLUMNS.items():
+        if param_name == "host":
+            continue  # subdomain-aware handling below (UA-23)
         v = filters.get(param_name)
         if v:
             clauses.append(f"{col_expr} = ?")
             params.append(v)
+
+    # Host filter: match the domain AND its subdomains — the IOC pivot analysts
+    # actually want. Use host_exact for a strict single-host match.
+    host = filters.get("host")
+    if host:
+        clauses.append(f"(v.dns_host = ? OR v.dns_host LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}')")
+        params.append(host)
+        params.append(f"%.{_like_escape(host)}")
+    host_exact = filters.get("host_exact")
+    if host_exact:
+        clauses.append("v.dns_host = ?")
+        params.append(host_exact)
+
+    # Exclude visit_source values (comma-separated), e.g. keep carved off timelines.
+    exclude_source = filters.get("exclude_source")
+    if exclude_source:
+        srcs = [s.strip() for s in exclude_source.split(",") if s.strip()]
+        if srcs:
+            clauses.append("v.visit_source NOT IN (" + ",".join("?" * len(srcs)) + ")")
+            params.extend(srcs)
+
+    # Minimum source confidence: confirmed > likely > possible.
+    min_conf = filters.get("min_confidence")
+    if min_conf:
+        ladder = {"confirmed": ("confirmed",),
+                  "likely": ("confirmed", "likely"),
+                  "possible": ("confirmed", "likely", "possible")}
+        allowed = ladder.get(min_conf)
+        if allowed:
+            clauses.append("v.visit_source_confidence IN (" + ",".join("?" * len(allowed)) + ")")
+            params.extend(allowed)
 
     # Tag filter (JSON array contains; LIKE-escape the tag value)
     tag = filters.get("tag")
     if tag:
         clauses.append(f"v.tags LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'")
         params.append(f'%"{_like_escape(tag)}"%')
+
+    # Multi-tag boolean filter: tags=a,b,c with tags_mode=and|or (default and).
+    tags_raw = filters.get("tags")
+    if tags_raw:
+        tlist = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        if tlist:
+            subs = []
+            for t in tlist:
+                subs.append(f"v.tags LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                params.append(f'%"{_like_escape(t)}"%')
+            joiner = " OR " if (filters.get("tags_mode") or "and").lower() == "or" else " AND "
+            clauses.append("(" + joiner.join(subs) + ")")
 
     # Domain exclusion filter (comma-separated list)
     exclude_host = filters.get("exclude_host")
@@ -478,7 +562,9 @@ def _build_search_sql(filters, q: str, mode: str, sort: str, sort_dir: str):
 
 def _get_filters() -> Dict[str, Optional[str]]:
     """Extract filter parameters from request args."""
-    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end", "exclude_host"]
+    keys = list(FILTER_COLUMNS.keys()) + ["tag", "start", "end", "exclude_host",
+                                          "host_exact", "exclude_source", "min_confidence",
+                                          "tags", "tags_mode"]
     return {k: request.args.get(k) for k in keys}
 
 
@@ -575,6 +661,7 @@ CSV_COLUMNS = [
     "visit_duration_ms", "browser", "browser_engine", "browser_profile",
     "os_platform", "os_username", "endpoint_name", "source_db_path",
     "provenance_chain", "tags", "unfurl",
+    "raw_transition", "raw_from_visit", "raw_visit_id",
 ]
 
 
@@ -595,6 +682,9 @@ def api_export():
     # Use a dedicated connection for streaming (app context may close before
     # the generator finishes)
     db_path = g.db_path
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    filestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    active_filters = {k: v for k, v in f.items() if v}
 
     def generate():
         conn = sqlite3.connect(db_path)
@@ -602,6 +692,12 @@ def api_export():
         try:
             buf = io.StringIO()
             writer = csv.writer(buf)
+            # Reproducibility header (commented) so an export can be attributed.
+            writer.writerow(["# fm-browser export"])
+            writer.writerow(["# tool_version", TOOL_VERSION])
+            writer.writerow(["# exported_utc", stamp])
+            writer.writerow(["# query", q, "mode", mode])
+            writer.writerow(["# filters", json.dumps(active_filters)])
             writer.writerow(CSV_COLUMNS)
             yield buf.getvalue()
             buf.seek(0)
@@ -611,6 +707,21 @@ def api_export():
                 vals = []
                 for c in CSV_COLUMNS:
                     v = row[c] if c in row.keys() else ""
+                    if c == "tags":
+                        try:
+                            v = "; ".join(json.loads(v or "[]"))
+                        except (json.JSONDecodeError, TypeError):
+                            v = v or ""
+                    elif c == "unfurl":
+                        # Flatten decoded artifacts to readable "type=value" pairs
+                        # instead of dumping raw JSON (UA-27).
+                        try:
+                            v = " | ".join(
+                                f"{a.get('type')}={a.get('value', '')}"
+                                for a in json.loads(v or "[]")
+                            )
+                        except (json.JSONDecodeError, TypeError):
+                            v = v or ""
                     vals.append(v if v is not None else "")
                 writer.writerow(vals)
                 yield buf.getvalue()
@@ -622,7 +733,8 @@ def api_export():
     return Response(
         generate(),
         mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=export.csv"},
+        headers={"Content-Disposition":
+                 f"attachment; filename=fmbrowser_export_{filestamp}.csv"},
     )
 
 
@@ -660,9 +772,15 @@ def api_aggregate():
     limit = _safe_int(request.args.get("limit"), 20)
     if limit is None:
         return jsonify({"error": "limit must be an integer"}), 400
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(limit, MAX_AGG_LIMIT))
     sort = request.args.get("sort", "desc")
     f = _get_filters()
+    # Carved records carry fabricated timestamps (UA-19); keep them off time
+    # views by default unless the caller opts in with include_carved=1.
+    if (group_by in ("time_hour", "time_day", "time_week", "time_month")
+            and not f.get("exclude_source")
+            and request.args.get("include_carved") not in ("1", "true", "yes")):
+        f["exclude_source"] = "carved"
     q = request.args.get("q", "").strip()
     search_mode = request.args.get("mode", DEFAULT_SEARCH_MODE)
     if search_mode not in SEARCH_MODES:
@@ -674,6 +792,14 @@ def api_aggregate():
                 if used_fts else f"{TABLE_VISITS} v")
 
     sort_dir = "DESC" if sort == "desc" else "ASC"
+
+    # First/last-seen per group enables frequency-stacking / least-frequency
+    # hunting (UA-25). The COUNT includes every visit, but the time window must
+    # reflect REAL visits — carved rows carry fabricated timestamps (UA-19), so
+    # exclude them from the bounds (a carved-only group yields empty bounds).
+    _real_ts = "CASE WHEN v.visit_source='carved' THEN '' ELSE v.visit_time_utc END"
+    bounds = (f", MIN(NULLIF({_real_ts},'')) AS first_seen"
+              f", MAX(NULLIF({_real_ts},'')) AS last_seen")
 
     # Time-based grouping
     time_groups = {
@@ -691,6 +817,7 @@ def api_aggregate():
             select = "j.value AS label, COUNT(DISTINCT v.os_username) AS count"
         else:
             select = "j.value AS label, COUNT(*) AS count"
+        select += bounds
 
         sql = (f"SELECT {select} FROM {fts_join}, json_each(v.tags) AS j "
                f"WHERE {w} GROUP BY j.value ORDER BY count {sort_dir} LIMIT ?")
@@ -718,13 +845,19 @@ def api_aggregate():
             select = f"{col} AS label, COUNT(DISTINCT v.os_username) AS count"
         else:
             select = f"{col} AS label, COUNT(*) AS count"
+        select += bounds
 
         sql = (f"SELECT {select} FROM {fts_join} "
                f"WHERE {w} GROUP BY label ORDER BY count {sort_dir} LIMIT ?")
 
     try:
-        rows = [{"label": r["label"], "count": r["count"]}
-                for r in db.execute(sql, p + [limit]).fetchall()]
+        rows = []
+        for r in db.execute(sql, p + [limit]).fetchall():
+            d = {"label": r["label"], "count": r["count"]}
+            if "first_seen" in r.keys():
+                d["first_seen"] = r["first_seen"]
+                d["last_seen"] = r["last_seen"]
+            rows.append(d)
     except sqlite3.OperationalError as exc:
         return jsonify({"error": f"aggregate failed: {exc}",
                         "group_by": group_by, "metric": metric,
@@ -767,16 +900,25 @@ def api_heatmap():
     """Day-of-week × hour-of-day activity heatmap."""
     db = _get_db()
     f = _get_filters()
+    # Carved rows carry fabricated timestamps (UA-19); exclude from the activity
+    # heatmap by default unless include_carved=1.
+    if (not f.get("exclude_source")
+            and request.args.get("include_carved") not in ("1", "true", "yes")):
+        f["exclude_source"] = "carved"
     q = request.args.get("q", "").strip()
+    # Render the heatmap in the analyst's chosen local offset (signed minutes) so
+    # "active at 2am local" reasoning works without off-tool math (UA-11).
+    tz_min = _safe_int(request.args.get("tz_offset"), 0) or 0
+    tzmod = f"{tz_min:+d} minutes"
     w, p, used_fts = _build_where(f, fts_q=q, search_mode=DEFAULT_SEARCH_MODE)
     fts_join = (f"{TABLE_FTS} fts JOIN {TABLE_VISITS} v ON v.id = fts.rowid"
                 if used_fts else f"{TABLE_VISITS} v")
     try:
         rows = db.execute(
-            f"SELECT CAST(strftime('%w', v.visit_time_utc) AS INT) AS dow, "
-            f"CAST(strftime('%H', v.visit_time_utc) AS INT) AS hour, "
+            f"SELECT CAST(strftime('%w', v.visit_time_utc, ?) AS INT) AS dow, "
+            f"CAST(strftime('%H', v.visit_time_utc, ?) AS INT) AS hour, "
             f"COUNT(*) AS count FROM {fts_join} "
-            f"WHERE {w} AND v.visit_time_utc != '' GROUP BY dow, hour", p
+            f"WHERE {w} AND v.visit_time_utc != '' GROUP BY dow, hour", [tzmod, tzmod] + p
         ).fetchall()
     except sqlite3.OperationalError as exc:
         return jsonify({"error": f"heatmap failed: {exc}", "cells": []}), 400
@@ -834,6 +976,7 @@ def api_sources():
     rows = db.execute(
         f"SELECT il.id, il.source_db, il.browser, il.os_platform, il.os_username, "
         f"il.browser_profile, il.endpoint_name, il.row_count AS ingested_rows, il.ingested_at, "
+        f"il.source_sha256, il.source_size_bytes, il.tool_version, il.classifier_version, "
         f"COUNT(v.id) AS live_rows "
         f"FROM ingest_log il "
         f"LEFT JOIN {TABLE_VISITS} v ON v.source_db_path = il.source_db "
@@ -874,6 +1017,8 @@ def api_sources_delete():
 
     db.commit()
     rebuild_fts(g.db_path)
+    log_action(g.db_path, "delete_source", target=", ".join(deleted_sources),
+               after=deleted_visits, detail=f"{len(deleted_sources)} source(s)")
     return jsonify({
         "status": "ok",
         "deleted_visits": deleted_visits,
@@ -886,10 +1031,12 @@ def api_sources_delete():
 def api_clear():
     """Wipe all visit data and ingest log, keeping schema intact."""
     db = _get_db()
+    before = db.execute(f"SELECT COUNT(*) FROM {TABLE_VISITS}").fetchone()[0]
     db.execute(f"DELETE FROM {TABLE_VISITS}")
     db.execute("DELETE FROM ingest_log")
     db.commit()
     rebuild_fts(g.db_path)
+    log_action(g.db_path, "clear", before=before, after=0)
     return jsonify({"status": "ok", "message": "All data cleared"})
 
 
@@ -926,6 +1073,9 @@ def api_ingest():
     # pre-existing visits table restored without its FTS shadow).
     rebuild_fts(g.db_path)
     stats["fts_rows"] = fts_row_count(g.db_path)
+    log_action(g.db_path, "ingest", target=str(target),
+               after=stats.get("total_new_rows", 0),
+               detail=f"{stats.get('databases_found', 0)} db(s)")
     return jsonify(stats)
 
 
@@ -934,26 +1084,32 @@ def api_ingest():
 def api_reingest():
     """Re-run classification (Stage 3) and rebuild FTS index."""
     db = _get_db()
-    # Re-classify all visits
-    rows = db.execute(f"SELECT id, full_url, title, dns_host FROM {TABLE_VISITS}").fetchall()
-    from .pipeline.classify import decompose_url, classify_visit
+    rows = db.execute(f"SELECT * FROM {TABLE_VISITS}").fetchall()
+    from .pipeline.classify import classify_visit
+    from .pipeline.ingest import decode_chrome_transition
     from .pipeline.models import VisitRecord
 
     count = 0
     for row in rows:
-        record = VisitRecord(full_url=row["full_url"], title=row["title"] or "")
-        record = classify_visit(record)
-        db.execute(
-            f"UPDATE {TABLE_VISITS} SET dns_host=?, url_path=?, query_string_decoded=?, "
-            f"tags=?, unfurl=? WHERE id=?",
-            (record.dns_host, record.url_path, record.query_string_decoded,
-             json.dumps(record.tags), json.dumps(record.unfurl), row["id"])
-        )
+        rec = classify_visit(VisitRecord(full_url=row["full_url"], title=row["title"] or ""))
+        cols = "dns_host=?, url_path=?, query_string_decoded=?, tags=?, unfurl=?"
+        params = [rec.dns_host, rec.url_path, rec.query_string_decoded,
+                  json.dumps(rec.tags), json.dumps(rec.unfurl)]
+        # Re-derive transition from the persisted raw bitmask (B-9) so a bad
+        # decode can be corrected without a full re-ingest (UA-9). Chromium only.
+        raw_t = row["raw_transition"] if "raw_transition" in row.keys() else 0
+        if row["browser_engine"] == "chromium" and raw_t:
+            tt, tq = decode_chrome_transition(raw_t)
+            cols += ", transition_type=?, transition_qualifiers=?"
+            params += [tt, tq]
+        params.append(row["id"])
+        db.execute(f"UPDATE {TABLE_VISITS} SET {cols} WHERE id=?", params)
         count += 1
 
     db.commit()
     rebuild_fts(g.db_path)
-    return jsonify({"reclassified": count})
+    log_action(g.db_path, "reingest", after=count, detail=f"classifier {classifier_version()}")
+    return jsonify({"reclassified": count, "classifier_version": classifier_version()})
 
 
 @app.route("/api/rebuild-fts", methods=["POST"])

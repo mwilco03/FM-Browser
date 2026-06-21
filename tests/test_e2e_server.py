@@ -794,11 +794,15 @@ def run_tests():
         r = client.get("/api/export")
         if r.status_code == 200 and r.content_type.startswith("text/csv"):
             lines = r.data.decode().strip().split("\n")
-            if len(lines) >= 2 and "visit_time_utc" in lines[0]:
-                print(f"[PASS] GET /api/export — CSV with {len(lines)-1} data rows")
+            # Metadata header rows (prefixed '#') precede the column header (UA-27).
+            header_idx = next((i for i, l in enumerate(lines) if "visit_time_utc" in l), -1)
+            has_meta = any(l.startswith("# fm-browser") for l in lines)
+            data_rows = (len(lines) - header_idx - 1) if header_idx >= 0 else 0
+            if header_idx >= 0 and has_meta and data_rows >= 1:
+                print(f"[PASS] GET /api/export — CSV ({data_rows} rows) + reproducibility header")
                 passed += 1
             else:
-                print(f"[FAIL] GET /api/export — bad CSV content: header={lines[0][:60]}")
+                print(f"[FAIL] GET /api/export — header_idx={header_idx} meta={has_meta} rows={data_rows}")
                 failed += 1
         else:
             print(f"[FAIL] GET /api/export — status={r.status_code}, type={r.content_type}")

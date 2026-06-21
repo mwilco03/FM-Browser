@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS {TABLE_VISITS} (
     tags                    TEXT NOT NULL DEFAULT '[]',
 
     -- URL unfurling (JSON array of extracted artifacts)
-    unfurl                  TEXT NOT NULL DEFAULT '[]'
+    unfurl                  TEXT NOT NULL DEFAULT '[]',
+
+    -- Raw forensic source values (pre-decode, independently verifiable; B-9)
+    raw_transition          INTEGER NOT NULL DEFAULT 0,
+    raw_from_visit          INTEGER NOT NULL DEFAULT 0,
+    raw_visit_id            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_visits_host       ON {TABLE_VISITS}(dns_host);
@@ -99,7 +104,23 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     browser_profile TEXT NOT NULL DEFAULT '',
     endpoint_name TEXT NOT NULL DEFAULT '',
     row_count   INTEGER NOT NULL DEFAULT 0,
-    ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Chain of custody (B-3)
+    source_sha256      TEXT NOT NULL DEFAULT '',
+    source_size_bytes  INTEGER NOT NULL DEFAULT 0,
+    tool_version       TEXT NOT NULL DEFAULT '',
+    classifier_version TEXT NOT NULL DEFAULT ''
+);
+
+-- Append-only audit of destructive / mutating operations (B-4)
+CREATE TABLE IF NOT EXISTS action_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp_utc TEXT NOT NULL DEFAULT (datetime('now')),
+    action        TEXT NOT NULL,
+    target        TEXT NOT NULL DEFAULT '',
+    before_count  INTEGER NOT NULL DEFAULT 0,
+    after_count   INTEGER NOT NULL DEFAULT 0,
+    detail        TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -109,8 +130,9 @@ INSERT INTO {TABLE_VISITS} (
     browser_profile, os_username, endpoint_name, visit_time_utc, full_url,
     title, dns_host, url_path, query_string_decoded, visit_source,
     visit_source_confidence, transition_type, transition_qualifiers,
-    from_visit_url, visit_duration_ms, tags, unfurl
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    from_visit_url, visit_duration_ms, tags, unfurl,
+    raw_transition, raw_from_visit, raw_visit_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """
 
 
@@ -118,12 +140,22 @@ def init_schema(db_path: str) -> None:
     """Initialize the index database schema."""
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA_DDL)
-        # Migrate: add unfurl column if missing (for pre-existing databases)
-        try:
-            conn.execute(f"SELECT unfurl FROM {TABLE_VISITS} LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.execute(f"ALTER TABLE {TABLE_VISITS} ADD COLUMN unfurl TEXT NOT NULL DEFAULT '[]'")
-            LOG.info("Migrated: added unfurl column")
+        # Migrate: add columns that may be missing on pre-existing databases.
+        for tbl, col, decl in (
+            (TABLE_VISITS, "unfurl", "TEXT NOT NULL DEFAULT '[]'"),
+            (TABLE_VISITS, "raw_transition", "INTEGER NOT NULL DEFAULT 0"),
+            (TABLE_VISITS, "raw_from_visit", "INTEGER NOT NULL DEFAULT 0"),
+            (TABLE_VISITS, "raw_visit_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("ingest_log", "source_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("ingest_log", "source_size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+            ("ingest_log", "tool_version", "TEXT NOT NULL DEFAULT ''"),
+            ("ingest_log", "classifier_version", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                conn.execute(f"SELECT {col} FROM {tbl} LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+                LOG.info("Migrated: added %s.%s", tbl, col)
     LOG.info("Schema initialized: %s", db_path)
 
 
@@ -136,16 +168,20 @@ def _record_to_tuple(r: VisitRecord) -> tuple:
         r.query_string_decoded, r.visit_source, r.visit_source_confidence,
         r.transition_type, r.transition_qualifiers, r.from_visit_url,
         r.visit_duration_ms, json.dumps(r.tags), json.dumps(r.unfurl),
+        r.raw_transition, r.raw_from_visit, r.raw_visit_id,
     )
 
 
 def insert_visits(db_path: str, records: List[VisitRecord], source_db: str = "",
                   meta_browser: str = "", meta_platform: str = "",
                   meta_username: str = "", meta_profile: str = "",
-                  meta_endpoint: str = "") -> int:
+                  meta_endpoint: str = "", source_sha256: str = "",
+                  source_size_bytes: int = 0, tool_version: str = "",
+                  classifier_version: str = "") -> int:
     """Insert classified visit records into the index database.
 
-    Returns the number of records inserted.
+    Returns the number of records inserted. Chain-of-custody fields
+    (source_sha256/size, tool/classifier version) are recorded on ingest_log (B-3).
     """
     if not records:
         return 0
@@ -164,14 +200,30 @@ def insert_visits(db_path: str, records: List[VisitRecord], source_db: str = "",
         conn.executemany(INSERT_VISIT_SQL, batch)
         conn.execute(
             "INSERT INTO ingest_log (source_db, browser, os_platform, os_username, "
-            "browser_profile, endpoint_name, row_count) VALUES (?,?,?,?,?,?,?)",
+            "browser_profile, endpoint_name, row_count, source_sha256, "
+            "source_size_bytes, tool_version, classifier_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (source_db, meta_browser, meta_platform, meta_username, meta_profile,
-             meta_endpoint, len(batch))
+             meta_endpoint, len(batch), source_sha256, source_size_bytes,
+             tool_version, classifier_version)
         )
         conn.commit()
 
     LOG.info("Indexed %d visits from %s", len(batch), source_db or "unknown")
     return len(batch)
+
+
+def log_action(db_path: str, action: str, target: str = "", before: int = 0,
+               after: int = 0, detail: str = "") -> None:
+    """Append an audit record for a destructive/mutating operation (B-4)."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO action_log (action, target, before_count, after_count, detail) "
+                "VALUES (?,?,?,?,?)", (action, target, before, after, detail))
+            conn.commit()
+    except sqlite3.Error as e:
+        LOG.warning("action_log write failed: %s", e)
 
 
 def is_already_ingested(db_path: str, source_db: str) -> bool:

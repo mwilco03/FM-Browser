@@ -76,12 +76,27 @@ def decompose_url(url: str) -> Dict[str, Any]:
 
     flat = [f"{k}={v}" for k, vs in ordered.items() for v in vs]
 
+    # urlparse parses the port lazily; `.port` raises ValueError for an
+    # out-of-range/non-numeric port (e.g. http://h:99999/). An adversarial
+    # evidence URL must not be able to crash decomposition.
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    scheme = parsed.scheme or ""
+    host = parsed.hostname or ""
+    # chrome-extension://<id>/ and moz-extension://<uuid>/ carry an opaque
+    # extension id in the netloc; it is not a DNS host and pollutes host
+    # aggregation, so don't expose it as `host` (UA-21). It remains in full_url.
+    if scheme in ("chrome-extension", "moz-extension"):
+        host = ""
     return {
-        "host": parsed.hostname or "",
+        "host": host,
         "query_string": "&".join(flat),
         "path": parsed.path or "",
-        "scheme": parsed.scheme or "",
-        "port": parsed.port,
+        "scheme": scheme,
+        "port": port,
     }
 
 
@@ -554,6 +569,17 @@ def classifier(name: str):
     return decorator
 
 
+def classifier_version() -> str:
+    """Stable fingerprint of the registered classifier set (B-3 / chain of custody).
+
+    Changes whenever a classifier is added/removed/renamed, so the DB can record
+    which classifier set produced a row's tags.
+    """
+    import hashlib
+    names = "|".join(sorted(name for name, _ in _CLASSIFIER_REGISTRY))
+    return hashlib.sha1(names.encode()).hexdigest()[:12]
+
+
 @classifier("cred_in_url")
 def _cls_cred_in_url(r: VisitRecord) -> Optional[str]:
     """Detect credentials embedded in URL (user:pass@host)."""
@@ -643,11 +669,23 @@ def _cls_cloud_storage(r: VisitRecord) -> Optional[str]:
 
 @classifier("file_scheme")
 def _cls_file_scheme(r: VisitRecord) -> Optional[str]:
-    """Detect non-HTTP URL schemes."""
+    """Detect non-HTTP URL schemes (file/data/javascript/blob)."""
     try:
         scheme = urlparse(r.full_url).scheme.lower()
-        if scheme in ("file", "data", "javascript", "blob", "chrome-extension", "moz-extension"):
+        if scheme in ("file", "data", "javascript", "blob"):
             return "file_scheme"
+    except Exception:
+        pass
+    return None
+
+
+@classifier("browser_extension")
+def _cls_browser_extension(r: VisitRecord) -> Optional[str]:
+    """Browser-extension URLs (chrome-extension://, moz-extension://) — kept
+    distinct from file_scheme and from DNS hosts (UA-21)."""
+    try:
+        if urlparse(r.full_url).scheme.lower() in ("chrome-extension", "moz-extension"):
+            return "browser_extension"
     except Exception:
         pass
     return None
@@ -808,8 +846,13 @@ def extract_search_terms(url: str) -> Optional[str]:
 
 def classify_visit(record: VisitRecord) -> VisitRecord:
     """Run all classifiers on a visit record and populate URL decomposition + tags."""
-    # URL decomposition
-    parts = decompose_url(record.full_url)
+    # URL decomposition. Defense-in-depth: a malformed URL must never abort the
+    # whole batch (classify_batch is a bare comprehension with no per-record guard).
+    try:
+        parts = decompose_url(record.full_url)
+    except Exception as e:
+        LOG.debug("URL decomposition error: %s", e)
+        parts = {"host": "", "query_string": "", "path": "", "scheme": "", "port": None}
     record.dns_host = parts["host"]
     record.url_path = parts["path"]
     record.query_string_decoded = parts["query_string"]
